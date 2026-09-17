@@ -169,7 +169,7 @@ export function loadConfig(): AppConfig {
   const config: AppConfig = {
     appVersion: envString('APP_VERSION') ?? readPackageVersion(),
     host: envString('HOST') ?? '0.0.0.0',
-    port: envInt('PORT', 8585),
+    port: envInt('PORT', 8586),
     configDir,
     databaseFile: path.join(configDir, 'fleetarr.db'),
     migrationsDir: envString('MIGRATIONS_DIR') ?? fromServerRoot('../migrations/'),

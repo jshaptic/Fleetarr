@@ -32,7 +32,7 @@ TypeScript monorepo, npm workspaces, Node >= 22. `packages/shared` (types, queue
 `expandBraces`) → `apps/server` (Fastify + better-sqlite3 + migrations) → `apps/web`
 (Vue 3 + Pinia + Vite). `npm run build` once before anything else - **server and web resolve
 shared from `dist`**, so a contract change is invisible until it is rebuilt. Then
-`npm run dev` (:8585 + :5173), `npm run typecheck`, `npm test`.
+`npm run dev` (:8586 + :5173), `npm run typecheck`, `npm test`.
 
 ## Visual language
 

@@ -43,7 +43,7 @@ docker compose build
 docker compose up -d
 ```
 
-Then open http://localhost:8585, add your Radarr/Sonarr instances, and work from there.
+Then open http://localhost:8586, add your Radarr/Sonarr instances, and work from there.
 
 Copy `.env.example` to `.env` before `up` if you want to set `FLEETARR_SECRET`, `PUID`/`PGID`
 or timezone. The compose file is written for Unraid-style `/mnt/user/data` and
@@ -119,7 +119,7 @@ The entrypoint reports writability of each storage root at boot (`docker logs`):
 | Variable | Default | Purpose |
 |---|---|---|
 | `APP_VERSION` | *(package.json)* | Reported by `GET /api/health`. Set at image build time; local runs read the repo-root `package.json`. |
-| `PORT` | `8585` | HTTP port |
+| `PORT` | `8586` | HTTP port |
 | `HOST` | `0.0.0.0` | Bind address |
 | `CONFIG_DIR` | `/config` | Database + key file location |
 | `FLEETARR_SECRET` | *(generated)* | Key material for encrypting stored *Arr API keys. Generate once with `openssl rand -base64 48`. If unset, a `secret.key` file is created at `$CONFIG_DIR/secret.key` (mode 0600). |
@@ -142,7 +142,7 @@ Node.js >= 22 and npm 10+.
 ```bash
 npm install
 npm run build          # shared must be built once before the watchers start
-npm run dev            # server on :8585, Vite on :5173
+npm run dev            # server on :8586, Vite on :5173
 ```
 
 Open http://localhost:5173 - Vite proxies `/api` to Fastify. The SQLite database and the

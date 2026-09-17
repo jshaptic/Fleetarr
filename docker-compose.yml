@@ -11,14 +11,14 @@ services:
     container_name: fleetarr
     restart: unless-stopped
     ports:
-      - "8585:8585"
+      - "8586:8586"
     environment:
       TZ: ${TZ:-Europe/Riga}
       PUID: "${PUID:-99}"          # Unraid: nobody
       PGID: "${PGID:-100}"         # Unraid: users
       # 002 keeps new folders group-writable, so the *Arr apps can write into them too.
       UMASK: "002"
-      PORT: "8585"
+      PORT: "8586"
       CONFIG_DIR: /config
       LOG_LEVEL: info
       # Storage Fleetarr may inspect and modify, colon-separated. MUST be the same paths
@@ -41,7 +41,7 @@ services:
       #   /mnt/user/data on the host  ->  /data in Radarr, Sonarr AND Fleetarr
       - /mnt/user/data:/data:rw
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8585/api/health >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8586/api/health >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

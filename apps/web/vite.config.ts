@@ -12,7 +12,7 @@ export default defineConfig({
     port: 5173,
     // Same-origin in production, so dev proxies /api to the Fastify process.
     proxy: {
-      '/api': { target: 'http://127.0.0.1:8585', changeOrigin: true },
+      '/api': { target: 'http://127.0.0.1:8586', changeOrigin: true },
     },
   },
   build: { outDir: 'dist', emptyOutDir: true, sourcemap: false },

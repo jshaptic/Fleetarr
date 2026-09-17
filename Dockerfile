@@ -46,7 +46,7 @@ ARG APP_VERSION=
 ARG GIT_SHA=unknown
 
 ENV NODE_ENV=production \
-    PORT=8585 \
+    PORT=8586 \
     HOST=0.0.0.0 \
     CONFIG_DIR=/config \
     WEB_ROOT=/app/apps/web/dist \
@@ -78,7 +78,7 @@ COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 VOLUME ["/config"]
-EXPOSE 8585
+EXPOSE 8586
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD wget -qO- "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1 || exit 1
