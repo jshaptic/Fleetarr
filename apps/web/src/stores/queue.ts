@@ -520,7 +520,7 @@ export const useQueueStore = defineStore('queue', () => {
   /**
    * Switch a root folder to another folder, staged as a dependent chain per instance:
    *   create the folder on disk (if it is not there) -> create the destination root folder
-   *   -> move the media -> optionally rescan -> remove the old root folder.
+   *   -> move the media -> re-aim the import lists -> remove the old root folder.
    *
    * Each step depends on the previous one, so a failed move can never be followed by the
    * removal of the folder the media is still in. The disk step is shared: one `fs.mkdir` that
@@ -539,9 +539,8 @@ export const useQueueStore = defineStore('queue', () => {
      * step one and skip the whole chain behind it.
      */
     mkdirPath: string | null;
-    refreshAfter: boolean;
   }): Promise<void> {
-    const { targets, fromPath, toPath, moveFiles, mkdirPath, refreshAfter } = params;
+    const { targets, fromPath, toPath, moveFiles, mkdirPath } = params;
     if (targets.length === 0) {
       ui.notify('info', 'Nothing to switch');
       return;
@@ -608,26 +607,7 @@ export const useQueueStore = defineStore('queue', () => {
       const gate = (target: RemapTarget): number | undefined =>
         moveByInstance.get(target.instanceId) ?? created.get(target.instanceId) ?? mkdirId;
 
-      // Step 3: optionally make the instance read the new paths. Off by default when the
-      // files are moving, because *Arr answers the editor PUT before the move has run.
-      if (refreshAfter) {
-        const rescans = targets.filter((target) => target.mediaIds.length > 0);
-        if (rescans.length > 0) {
-          await queueApi.push(
-            rescans.map((target): NewQueueItem => {
-              const dependsOnId = gate(target);
-              return {
-                instanceId: target.instanceId,
-                op: 'media.refresh',
-                payload: { mediaIds: [...target.mediaIds] },
-                ...(dependsOnId === undefined ? {} : { dependsOnId }),
-              };
-            }),
-          );
-        }
-      }
-
-      // Step 4: aim the import lists at the new folder, gated the same way. A list that
+      // Step 3: aim the import lists at the new folder, gated the same way. A list that
       // still fills the old folder is what refills it after the media leaves.
       const relists = targets.flatMap((target) =>
         (target.importLists ?? []).map((list) => ({ target, list })),
@@ -649,7 +629,7 @@ export const useQueueStore = defineStore('queue', () => {
         );
       }
 
-      // Step 5: optional cleanup of the old root folder, gated on its move succeeding.
+      // Step 4: optional cleanup of the old root folder, gated on its move succeeding.
       const removals = targets.filter((target) => target.removeRootFolderId !== null);
       if (removals.length > 0) {
         await queueApi.push(
@@ -725,7 +705,6 @@ export const useQueueStore = defineStore('queue', () => {
       oldRootFolderId: number | null;
     }>;
     removeOldRootFolder: boolean;
-    refreshAfter: boolean;
   }): Promise<void> {
     busy.value = true;
     try {
@@ -750,8 +729,8 @@ export const useQueueStore = defineStore('queue', () => {
 
         // Step 3: realign the media. moveFiles is false by design.
         //
-        // An instance with nothing under the folder skips this and the rescan: a root
-        // folder can be configured before a single download (see `PathOwner.use`), and a
+        // An instance with nothing under the folder skips this: a root folder can be
+        // configured before a single download (see `PathOwner.use`), and a
         // bulk edit with no ids is a request *Arr has no reason to accept. Re-pointing it
         // is still the create-and-drop pair below, so the instance is never left out.
         let realignId = rootFolderId;
@@ -772,19 +751,7 @@ export const useQueueStore = defineStore('queue', () => {
           realignId = realigned.items[0]?.id ?? rootFolderId;
         }
 
-        // Step 4: make the instance look at the new paths.
-        if (params.refreshAfter && target.mediaIds.length > 0) {
-          await queueApi.push([
-            {
-              instanceId: target.instanceId,
-              op: 'media.refresh',
-              payload: { mediaIds: [...target.mediaIds] },
-              dependsOnId: realignId,
-            },
-          ]);
-        }
-
-        // Step 5: drop the old root folder, only if its move succeeded.
+        // Step 4: drop the old root folder, only if its move succeeded.
         if (params.removeOldRootFolder && target.oldRootFolderId !== null) {
           await queueApi.push([
             {

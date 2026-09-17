@@ -78,7 +78,6 @@ const alignable = computed(() => props.operation === 'rename' && props.alignTarg
 const selectedInstances = ref<number[]>([]);
 const mediaIds = ref<Record<string, number[] | 'loading' | 'error'>>({});
 const removeOld = ref(true);
-const refreshAfter = ref(true);
 
 function mediaKey(instanceId: number, path: string): string {
   return `${String(instanceId)}\n${path}`;
@@ -186,26 +185,57 @@ const counting = computed(() =>
   ),
 );
 
+/** One run of text in a staged step; `mono` for a path, `tone` for the flag worth reading. */
+type StepPart = { text: string; mono?: boolean; tone?: 'sync' };
+
+/**
+ * Every queue item this dialog will stage, in the order `stageReconcile` pushes them.
+ *
+ * Both the numbered chain and the footer count read this array, so a line can never stand
+ * for three operations the button has already counted separately.
+ */
+const plan = computed<StepPart[][]>(() => {
+  const destination = destinationPath();
+  const steps: StepPart[][] = [
+    [
+      { text: 'rename ' },
+      { text: props.target, mono: true },
+      { text: ' to ' },
+      { text: destination ?? '', mono: true },
+      { text: ' on disk' },
+    ],
+  ];
+
+  // Per (instance, root folder), because that is one target: the disk step is shared, the
+  // rest of the chain is not.
+  for (const entry of chosen.value) {
+    for (const root of entry.roots) {
+      const to =
+        destination === null ? root.path : rewritePathPrefix(root.path, props.target, destination);
+      steps.push([{ text: `on ${entry.name}: add ` }, { text: to, mono: true }]);
+
+      const items = idsFor(entry.instanceId, root.path).length;
+      if (items > 0) {
+        steps.push([
+          { text: `on ${entry.name}: point ${String(items)} item(s) at it with ` },
+          { text: 'moveFiles: false', mono: true, tone: 'sync' },
+        ]);
+      }
+
+      if (removeOld.value && root.rootFolderId !== null) {
+        steps.push([
+          { text: `on ${entry.name}: drop the old root folder ` },
+          { text: root.path, mono: true },
+        ]);
+      }
+    }
+  }
+
+  return steps;
+});
+
 /** What the footer promises, counted the way the queue will actually build it. */
-const stepCount = computed(
-  () =>
-    1 +
-    chosen.value.reduce((sum, entry) => {
-      return (
-        sum +
-        entry.roots.reduce((rootSum, root) => {
-          const items = idsFor(entry.instanceId, root.path).length;
-          return (
-            rootSum +
-            1 +
-            (items > 0 ? 1 : 0) +
-            (items > 0 && refreshAfter.value ? 1 : 0) +
-            (removeOld.value && root.rootFolderId !== null ? 1 : 0)
-          );
-        }, 0)
-      );
-    }, 0),
-);
+const stepCount = computed(() => plan.value.length);
 
 async function loadMediaIds(): Promise<void> {
   for (const entry of props.alignTargets) {
@@ -279,7 +309,6 @@ async function stage(): Promise<void> {
       from: candidate.payload.from,
       to: candidate.payload.to,
       removeOldRootFolder: removeOld.value,
-      refreshAfter: refreshAfter.value,
       targets: chosen.value.flatMap((entry) =>
         entry.roots.map((root) => ({
           instanceId: entry.instanceId,
@@ -478,15 +507,6 @@ watch([name, destination, recursive, force], () => void check());
 
         <div class="space-y-2 rounded-md border border-line bg-raised/40 px-3 py-2.5 text-xs">
           <label class="flex items-start gap-2">
-            <BaseCheckbox v-model="refreshAfter" class="mt-0.5" />
-            <span>
-              <span class="font-medium text-ink">Rescan afterwards</span>
-              <span class="block text-[11px] text-muted">
-                Sends RefreshMovie / RefreshSeries so the instance re-reads the new paths.
-              </span>
-            </span>
-          </label>
-          <label class="flex items-start gap-2">
             <BaseCheckbox v-model="removeOld" class="mt-0.5" />
             <span>
               <span class="font-medium text-ink">Remove the old root folder</span>
@@ -501,28 +521,14 @@ watch([name, destination, recursive, force], () => void check());
         <div v-if="chosen.length > 0" class="rounded-lg border border-staged/40 bg-staged/5 px-3 py-2.5">
           <p class="mb-1.5 text-[11px] font-semibold text-staged">What will be staged</p>
           <ol class="space-y-1 text-[11px] text-muted">
-            <li>
-              <span class="font-mono text-ink">1.</span>
-              rename <span class="font-mono">{{ props.target }}</span> to
-              <span class="font-mono">{{ item?.op === 'fs.rename' ? item.payload.to : '' }}</span>
-              on disk
-            </li>
-            <li v-for="(entry, index) in chosen" :key="entry.instanceId">
-              <span class="font-mono text-ink">{{ index + 2 }}.</span>
-              on {{ entry.name }}:
-              <template v-for="(root, rootIndex) in entry.roots" :key="root.path">
-                <span v-if="rootIndex > 0">; </span>
-                add
-                <span class="font-mono">{{
-                  destinationPath() === null
-                    ? root.path
-                    : rewritePathPrefix(root.path, props.target, destinationPath() ?? props.target)
-                }}</span>
-                <template v-if="idsFor(entry.instanceId, root.path).length > 0"
-                  >, point its media at it with
-                  <span class="font-mono text-sync">moveFiles: false</span><span v-if="refreshAfter">, rescan</span></template>
-                <span v-if="removeOld && root.rootFolderId !== null">, then drop the old root folder</span>
-              </template>
+            <li v-for="(step, index) in plan" :key="index">
+              <span class="font-mono text-ink">{{ index + 1 }}.</span>
+              <template v-for="(part, partIndex) in step" :key="partIndex"
+                ><span
+                  :class="[part.mono === true ? 'font-mono' : '', part.tone === 'sync' ? 'text-sync' : '']"
+                  >{{ part.text }}</span
+                ></template
+              >
             </li>
           </ol>
           <p class="mt-2 text-[11px] leading-relaxed text-muted">

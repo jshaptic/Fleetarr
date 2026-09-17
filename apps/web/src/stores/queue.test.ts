@@ -145,7 +145,6 @@ describe('fleet fan-out', () => {
       toPath: '/data/media-4k',
       moveFiles: true,
       mkdirPath: null,
-      refreshAfter: false,
       targets: [
         { instanceId: 1, mediaIds: [10, 11], needsRootFolder: true, removeRootFolderId: 5 },
         { instanceId: 2, mediaIds: [20], needsRootFolder: false, removeRootFolderId: null },
@@ -190,7 +189,6 @@ describe('fleet fan-out', () => {
       toPath: '/data/media-4k',
       moveFiles: true,
       mkdirPath: '/data/media-4k',
-      refreshAfter: false,
       targets: [
         { instanceId: 1, mediaIds: [10], needsRootFolder: true, removeRootFolderId: 5 },
         { instanceId: 2, mediaIds: [20], needsRootFolder: true, removeRootFolderId: 6 },
@@ -215,7 +213,6 @@ describe('fleet fan-out', () => {
       toPath: '/data/media-4k',
       moveFiles: true,
       mkdirPath: null,
-      refreshAfter: false,
       targets: [
         { instanceId: 1, mediaIds: [], needsRootFolder: true, removeRootFolderId: 5 },
       ],
@@ -243,7 +240,6 @@ describe('fleet fan-out', () => {
       toPath: '/data/media-4k',
       moveFiles: true,
       mkdirPath: null,
-      refreshAfter: false,
       targets: [
         {
           instanceId: 1,
@@ -270,7 +266,7 @@ describe('fleet fan-out', () => {
     });
   });
 
-  it('a rescan, when asked for, waits on the move and covers only instances with media', async () => {
+  it('never stages a rescan - *Arr answers the move before it has moved anything', async () => {
     const queue = useQueueStore();
 
     await queue.remapRootFolder({
@@ -278,23 +274,15 @@ describe('fleet fan-out', () => {
       toPath: '/data/media-4k',
       moveFiles: false,
       mkdirPath: null,
-      refreshAfter: true,
       targets: [
-        { instanceId: 1, mediaIds: [10, 11], needsRootFolder: false, removeRootFolderId: null },
+        { instanceId: 1, mediaIds: [10, 11], needsRootFolder: false, removeRootFolderId: 8 },
         { instanceId: 2, mediaIds: [], needsRootFolder: false, removeRootFolderId: null },
       ],
     });
 
-    // Nobody needs a destination root folder here, so there is no create batch: the moves are
-    // the first push and the rescans the second.
-    const rescans = push.mock.calls[1]?.[0] ?? [];
-    expect(rescans).toHaveLength(1);
-    expect(rescans[0]).toMatchObject({
-      instanceId: 1,
-      op: 'media.refresh',
-      payload: { mediaIds: [10, 11] },
-      dependsOnId: 1,
-    });
+    expect(
+      push.mock.calls.flatMap((call) => call[0]).filter((item) => item.op === 'media.refresh'),
+    ).toHaveLength(0);
   });
 
   it('a parent rename realigns each nested root folder, not the parent path', async () => {
@@ -304,7 +292,6 @@ describe('fleet fan-out', () => {
       from: '/data/media/movies/europe',
       to: '/data/media/movies/european',
       removeOldRootFolder: true,
-      refreshAfter: true,
       targets: [
         {
           instanceId: 1,
@@ -332,20 +319,18 @@ describe('fleet fan-out', () => {
       'fs.rename',
       'rootFolder.create',
       'media.moveRootFolder',
-      'media.refresh',
       'rootFolder.delete',
       'rootFolder.create',
       'media.moveRootFolder',
-      'media.refresh',
       'rootFolder.delete',
     ]);
     expect(ops[1]?.payload).toEqual({ path: '/data/media/movies/european/auto-feed/0k' });
-    expect(ops[5]?.payload).toEqual({ path: '/data/media/movies/european/curated-feed/0k' });
-    expect(ops[4]?.payload).toEqual({
+    expect(ops[4]?.payload).toEqual({ path: '/data/media/movies/european/curated-feed/0k' });
+    expect(ops[3]?.payload).toEqual({
       rootFolderId: 8,
       path: '/data/media/movies/europe/auto-feed/0k',
     });
-    expect(ops[8]?.payload).toEqual({
+    expect(ops[6]?.payload).toEqual({
       rootFolderId: 9,
       path: '/data/media/movies/europe/curated-feed/0k',
     });

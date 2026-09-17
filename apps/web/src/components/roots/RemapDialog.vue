@@ -42,7 +42,6 @@ const ui = useUiStore();
 
 const toPath = ref('');
 const removeOld = ref(true);
-const refreshAfter = ref(false);
 const repointLists = ref(true);
 const acknowledgeNotEmpty = ref(false);
 const included = ref<number[]>([]);
@@ -274,20 +273,78 @@ const valid = computed(
     (destinationEmptiness.value !== 'occupied' || acknowledgeNotEmpty.value),
 );
 
-const stepCount = computed(
-  () =>
-    (mkdirPath.value === null ? 0 : 1) +
-    chosen.value.reduce((sum, candidate) => {
-      const moves = movesMedia(candidate.instanceId);
-      return (
-        sum +
-        (candidate.hasDestination ? 0 : 1) +
-        (moves ? 1 : 0) +
-        (moves && refreshAfter.value ? 1 : 0) +
-        listTargetsFor(candidate.instanceId).length +
-        (removeOld.value && candidate.oldRootFolderId !== null ? 1 : 0)
-      );
-    }, 0),
+/** One run of text in a staged step; `mono` for a path, `tone` for the flag worth reading. */
+type StepPart = { text: string; mono?: boolean; tone?: 'danger' };
+
+/**
+ * Every queue item this dialog will stage, in the order the queue receives them.
+ *
+ * The chain used to render one line per instance while the button counted operations, so a
+ * single instance getting a create, a move and a delete read as "1." under a button offering
+ * to stage three. Both now come from this array, which cannot disagree with itself - and the
+ * order is the queue's own, so the numbers are the order things will actually run in.
+ */
+const plan = computed<StepPart[][]>(() => {
+  const steps: StepPart[][] = [];
+  if (mkdirPath.value !== null) {
+    steps.push([{ text: 'create ' }, { text: mkdirPath.value, mono: true }, { text: ' on disk' }]);
+  }
+
+  // The destinations, then the moves, then the lists, then the removals: each group is its
+  // own push in `remapRootFolder`, and a later group depends on the earlier one landing.
+  for (const candidate of chosen.value) {
+    if (candidate.hasDestination) continue;
+    steps.push([
+      { text: `on ${candidate.name}: register ` },
+      { text: destination.value, mono: true },
+      { text: ' as a root folder' },
+    ]);
+  }
+
+  for (const candidate of chosen.value) {
+    if (!movesMedia(candidate.instanceId)) continue;
+    const items = itemsUnder(candidate.instanceId);
+    steps.push([
+      {
+        text: `on ${candidate.name}: move ${items === null ? 'its media' : `${String(items)} item(s)`} there with `,
+      },
+      { text: 'moveFiles: true', mono: true, tone: 'danger' },
+    ]);
+  }
+
+  for (const candidate of chosen.value) {
+    for (const list of listTargetsFor(candidate.instanceId)) {
+      steps.push([
+        { text: `on ${candidate.name}: re-aim ${list.name} at ` },
+        { text: list.toRootFolderPath, mono: true },
+      ]);
+    }
+  }
+
+  if (removeOld.value) {
+    for (const candidate of chosen.value) {
+      if (candidate.oldRootFolderId === null) continue;
+      steps.push([
+        { text: `on ${candidate.name}: stop rooting at ` },
+        { text: props.fromPath, mono: true },
+      ]);
+    }
+  }
+
+  return steps;
+});
+
+const stepCount = computed(() => plan.value.length);
+
+/**
+ * The instances the chain stages no move for.
+ *
+ * An absent line is not an explanation: the chain used to carry "keep the registration only"
+ * on the instance's own row, and with one line per operation there is no row left to hang it
+ * on. Naming them under the list says the same thing without a step number implying work.
+ */
+const registrationOnly = computed(() =>
+  chosen.value.filter((candidate) => !movesMedia(candidate.instanceId)),
 );
 
 async function judgeDestination(): Promise<void> {
@@ -357,7 +414,6 @@ async function confirm(): Promise<void> {
     // Always: without it the media is re-pointed at a path its files are not at.
     moveFiles: true,
     mkdirPath: mkdirPath.value,
-    refreshAfter: refreshAfter.value,
   });
   emit('close');
 }
@@ -618,18 +674,6 @@ watch(crossDevice, (crosses) => {
               </span>
             </span>
           </label>
-
-          <label class="flex items-start gap-2 text-xs">
-            <BaseCheckbox v-model="refreshAfter" data-testid="refresh-after" class="mt-0.5" />
-            <span>
-              <span class="font-medium text-ink">Rescan afterwards</span>
-              <span class="block text-[11px] leading-relaxed text-muted">
-                Off by default: *Arr answers the move request before it has moved anything, so a
-                rescan staged behind it would read the new paths while the files are still in
-                flight and report the library missing.
-              </span>
-            </span>
-          </label>
         </div>
 
         <div
@@ -677,33 +721,22 @@ watch(crossDevice, (crosses) => {
           What will be staged
         </p>
         <ol class="space-y-1 text-[11px] text-muted">
-          <li v-if="mkdirPath !== null">
-            <span class="font-mono text-ink">1.</span>
-            create <span class="font-mono">{{ mkdirPath }}</span> on disk
-          </li>
-          <li v-for="(candidate, index) in chosen" :key="candidate.instanceId">
-            <span class="font-mono text-ink">{{ index + (mkdirPath === null ? 1 : 2) }}.</span>
-            on {{ candidate.name }}:
-            <template v-if="!candidate.hasDestination"
-              >add <span class="font-mono">{{ destination }}</span
-              >,
-            </template>
-            <!--
-              No move is staged for an instance counted at zero, so the chain must not claim
-              one - the queue would then be shorter than the sentence describing it.
-            -->
-            <template v-if="movesMedia(candidate.instanceId)"
-              >move its media there with
-              <span class="font-mono text-danger">moveFiles: true</span></template
-            ><template v-else>keep the registration only - it has nothing to move</template
-            ><template v-if="movesMedia(candidate.instanceId) && refreshAfter">, rescan</template
-            ><template v-if="listTargetsFor(candidate.instanceId).length > 0"
-              >, re-aim {{ listTargetsFor(candidate.instanceId).length }} import list(s)</template
-            ><template v-if="removeOld && candidate.oldRootFolderId !== null"
-              >, then stop rooting at <span class="font-mono">{{ props.fromPath }}</span></template
+          <li v-for="(step, index) in plan" :key="index">
+            <span class="font-mono text-ink">{{ index + 1 }}.</span>
+            <template v-for="(part, partIndex) in step" :key="partIndex"
+              ><span
+                :class="[part.mono === true ? 'font-mono' : '', part.tone === 'danger' ? 'text-danger' : '']"
+                >{{ part.text }}</span
+              ></template
             >
           </li>
         </ol>
+        <p v-if="registrationOnly.length > 0" class="mt-2 text-[11px] leading-relaxed text-muted">
+          {{ registrationOnly.map((candidate) => candidate.name).join(', ') }}
+          {{ registrationOnly.length === 1 ? 'holds' : 'hold' }} nothing under
+          <span class="font-mono">{{ props.fromPath }}</span
+          >, so there is nothing to move - only the registration changes.
+        </p>
         <p class="mt-2 text-[11px] leading-relaxed text-muted">
           <template v-if="relocation === 'some'">
             Applying this means *Arr <em>accepted</em> the move, not that it finished - the files

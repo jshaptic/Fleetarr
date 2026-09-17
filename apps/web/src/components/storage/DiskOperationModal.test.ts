@@ -229,14 +229,15 @@ describe('DiskOperationModal', () => {
       dependsOnId: 2,
     });
 
-    // 4. rescan, then 5. drop the old root folder - both gated on the realignment
-    expect(batches[3]).toMatchObject({ instanceId: 1, op: 'media.refresh', dependsOnId: 3 });
-    expect(batches[4]).toMatchObject({
+    // 4. drop the old root folder, gated on the realignment
+    expect(batches[3]).toMatchObject({
       instanceId: 1,
       op: 'rootFolder.delete',
       payload: { rootFolderId: 5, path: ROOT },
       dependsOnId: 3,
     });
+    // Nothing follows it: a rescan would read the new paths before *Arr had finished.
+    expect(batches).toHaveLength(4);
     wrapper.unmount();
   });
 
@@ -245,7 +246,7 @@ describe('DiskOperationModal', () => {
 
     type('films');
     for (const box of document.body.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')) {
-      // The instance checkbox stays on; the two option toggles go off.
+      // The instance checkbox stays on; the option toggle goes off.
       if (box.checked && box !== document.body.querySelector('input[type="checkbox"]')) box.click();
     }
     for (let tick = 0; tick < 4; tick += 1) await flushPromises();

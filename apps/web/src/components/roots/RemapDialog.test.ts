@@ -329,7 +329,7 @@ describe('RemapDialog', () => {
     wrapper.unmount();
   });
 
-  it('does not rescan by default - *Arr answers before it has moved anything', async () => {
+  it('never stages a rescan - *Arr answers before it has moved anything', async () => {
     const wrapper = await mountDialog();
     await destination('/data/media/4k');
 
