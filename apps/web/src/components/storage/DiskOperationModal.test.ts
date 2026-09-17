@@ -1,7 +1,7 @@
 import type { NewQueueItem } from '@fleetarr/shared';
 import { flushPromises, mount } from '@vue/test-utils';
 import { createPinia } from 'pinia';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
  * The align half of this dialog used to be `ReconcileDialog`, a second row action beside
@@ -40,20 +40,40 @@ const push = vi.fn((items: readonly NewQueueItem[]) =>
   }),
 );
 
+/**
+ * Overridable per test: the delete branch renders its two options from the preflight's own
+ * verdict, so the checks a test hands back are the thing under test.
+ */
+const renamePreflight = () =>
+  Promise.resolve({
+    op: 'fs.rename',
+    ok: true,
+    checks: [{ id: 'same_device', status: 'ok', message: 'Same filesystem - atomic rename' }],
+    measurement: null,
+    freeSpace: null,
+    referencedBy: [],
+  });
+
+const preflight = vi.fn(renamePreflight);
+
+function deletePreflight(checks: { id: string; status: string; message: string }[]) {
+  return () =>
+    Promise.resolve({
+      op: 'fs.delete',
+      ok: !checks.some((check) => check.status === 'blocker'),
+      checks,
+      measurement: null,
+      freeSpace: null,
+      referencedBy: [],
+    });
+}
+
 vi.mock('@/api/storage', () => ({
   storageApi: {
     roots: () => Promise.resolve({ enabled: true, roots: [] }),
     list: vi.fn(),
     measure: vi.fn(),
-    preflight: () =>
-      Promise.resolve({
-        op: 'fs.rename',
-        ok: true,
-        checks: [{ id: 'same_device', status: 'ok', message: 'Same filesystem - atomic rename' }],
-        measurement: null,
-        freeSpace: null,
-        referencedBy: [],
-      }),
+    preflight: (...args: unknown[]) => preflight(...(args as [])),
   },
 }));
 
@@ -125,8 +145,17 @@ function stageButton(): HTMLButtonElement | undefined {
   );
 }
 
+// The dialog teleports into the body, so a test that fails before its own `unmount` would
+// otherwise leave a second dialog behind for the next one to find.
+afterEach(() => {
+  document.body.innerHTML = '';
+});
+
 beforeEach(() => {
   push.mockClear();
+  // mockClear keeps the implementation, and the delete tests swap it - so put it back.
+  preflight.mockReset();
+  preflight.mockImplementation(renamePreflight);
   nextId = 1;
 });
 
@@ -228,6 +257,110 @@ describe('DiskOperationModal', () => {
       'fs.rename',
       'rootFolder.create',
       'media.moveRootFolder',
+    ]);
+    wrapper.unmount();
+  });
+
+  // ------------------------------------------------- the delete branch's two options
+  //
+  // Each one is a question the preflight has already answered. Asking it anyway turned the
+  // ordinary case - an empty folder nobody references - into two irreversible-sounding
+  // checkboxes that changed nothing, which reads like the dangerous case.
+
+  const EMPTY = { id: 'empty', status: 'ok', message: 'Directory is empty' };
+  const UNREFERENCED = {
+    id: 'referenced_by_arr',
+    status: 'ok',
+    message: 'No connected instance references this path',
+  };
+
+  async function mountDelete(
+    checks: { id: string; status: string; message: string }[],
+  ): Promise<ReturnType<typeof mount>> {
+    preflight.mockImplementation(deletePreflight(checks) as never);
+    return mountDialog({ operation: 'delete', alignTargets: [] });
+  }
+
+  function box(name: 'recursive' | 'force'): Element | null {
+    return document.body.querySelector(`[data-testid="delete-${name}"]`);
+  }
+
+  it('asks neither question when the folder is empty and nothing references it', async () => {
+    const wrapper = await mountDelete([EMPTY, UNREFERENCED]);
+
+    expect(box('recursive')).toBeNull();
+    expect(box('force')).toBeNull();
+    // The delete itself is still a delete: the warning and the typed confirmation stay.
+    expect(document.body.textContent).toContain('Fleetarr has no recycle bin');
+    wrapper.unmount();
+  });
+
+  it('asks only about the contents when the folder is not empty', async () => {
+    const wrapper = await mountDelete([
+      { id: 'recursive_required', status: 'blocker', message: '/data/movies is not empty (3 entries)' },
+      UNREFERENCED,
+    ]);
+
+    expect(box('recursive')).not.toBeNull();
+    expect(box('force')).toBeNull();
+    wrapper.unmount();
+  });
+
+  it('asks only about the instance when one still references the path', async () => {
+    const wrapper = await mountDelete([
+      EMPTY,
+      { id: 'referenced_by_arr', status: 'blocker', message: '1 connected instance(s) still have media here' },
+    ]);
+
+    expect(box('recursive')).toBeNull();
+    expect(box('force')).not.toBeNull();
+    wrapper.unmount();
+  });
+
+  it('keeps asking about the contents once the box is ticked', async () => {
+    // The blocker becomes a warning the moment `recursive` is on. If the option vanished on
+    // its own answer it would untick itself, and the delete would refuse to stage.
+    const wrapper = await mountDelete([
+      { id: 'recursive_delete', status: 'warning', message: 'Deletes 4 GB in 12 file(s)' },
+      UNREFERENCED,
+    ]);
+
+    expect(box('recursive')).not.toBeNull();
+    wrapper.unmount();
+  });
+
+  it('drops an option from the payload when it stops being asked about', async () => {
+    const wrapper = await mountDelete([
+      { id: 'recursive_required', status: 'blocker', message: 'not empty' },
+      { id: 'referenced_by_arr', status: 'blocker', message: 'still referenced' },
+    ]);
+
+    box('recursive')?.dispatchEvent(new MouseEvent('click'));
+    box('force')?.dispatchEvent(new MouseEvent('click'));
+    for (let tick = 0; tick < 4; tick += 1) await flushPromises();
+
+    // Somebody emptied the folder and dropped it from the instance while the dialog was open.
+    // Unticking `recursive` is what re-runs the preflight; `force` is still ticked, and the
+    // point of the assertion below is that it does not survive into the payload unexplained.
+    preflight.mockImplementation(deletePreflight([EMPTY, UNREFERENCED]) as never);
+    box('recursive')?.dispatchEvent(new MouseEvent('click'));
+    for (let tick = 0; tick < 8; tick += 1) await flushPromises();
+
+    expect(box('recursive')).toBeNull();
+    expect(box('force')).toBeNull();
+
+    const confirm = document.body.querySelector<HTMLInputElement>('input[autocomplete="off"]');
+    if (confirm) {
+      confirm.value = 'movies';
+      confirm.dispatchEvent(new Event('input'));
+    }
+    for (let tick = 0; tick < 4; tick += 1) await flushPromises();
+
+    stageButton()?.click();
+    for (let tick = 0; tick < 6; tick += 1) await flushPromises();
+
+    expect(push.mock.calls.at(-1)?.[0]).toEqual([
+      { op: 'fs.delete', payload: { path: ROOT, recursive: false, force: false } },
     ]);
     wrapper.unmount();
   });

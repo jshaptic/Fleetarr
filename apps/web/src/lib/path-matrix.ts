@@ -305,6 +305,31 @@ export function rootFolderTargets(node: PathNode): RootFolderCellTarget[] {
   }));
 }
 
+/**
+ * Of a selection, the folders a delete may actually be staged for.
+ *
+ * Eligibility is not re-derived here: `actionsFor` already decides when a folder may be
+ * pruned - not a mount, on disk, and nothing anywhere would lose media by it - and a second
+ * copy of that rule is a second place for it to drift.
+ *
+ * A selected folder under another selected folder is dropped, because the parent's recursive
+ * delete takes it along: its own `fs.delete` would then fail its re-run preflight with
+ * `source_exists`, turning one staged batch into a paused run. The pair is reachable because
+ * selection survives collapsing a branch, so the descendant can be off screen by the time the
+ * ancestor is picked.
+ */
+export function prunableFolders(nodes: readonly PathNode[]): PathNode[] {
+  const eligible = nodes.filter((node) => actionsFor(node).includes('prune'));
+  return eligible.filter(
+    (node) => !eligible.some((other) => other !== node && isUnder(node.path, other.path)),
+  );
+}
+
+/** Strictly under: a path is never its own ancestor. */
+function isUnder(target: string, ancestor: string): boolean {
+  return target.startsWith(`${ancestor}/`);
+}
+
 /** Instances tracking media at or under a path, for the relocation warning. */
 export function trackedBy(
   node: PathNode,
@@ -573,7 +598,9 @@ export function actionsFor(node: PathNode): PathAction[] {
 
   if (node.canAddRootFolder) actions.push('addRoot');
 
-  if (flags.has('rootFolder') && rootFolders.some((owner) => owner.mediaUnder > 0)) {
+  // Any root folder, not only one with media in it: use is structural, so a configured but
+  // still empty root folder is exactly the one worth re-pointing before anything lands in it.
+  if (flags.has('rootFolder') && rootFolders.length > 0) {
     actions.push('remap');
   }
 

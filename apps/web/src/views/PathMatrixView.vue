@@ -10,12 +10,14 @@ import PathRowView from '@/components/paths/PathRowView.vue';
 import AddPathDialog from '@/components/roots/AddPathDialog.vue';
 import RemapDialog from '@/components/roots/RemapDialog.vue';
 import RemoveRootFoldersDialog from '@/components/roots/RemoveRootFoldersDialog.vue';
+import BulkDeleteDialog from '@/components/storage/BulkDeleteDialog.vue';
 import DiskOperationModal, { type DiskOperation } from '@/components/storage/DiskOperationModal.vue';
 import { basename, breadcrumbs, parentOf } from '@/lib/fs-tree';
 import { formatBytes, formatRelativeTime } from '@/lib/format';
 import { quoteFolderName } from '@/lib/new-folders';
 import {
   alignTargetsFor,
+  prunableFolders,
   rootFolderTargets,
   trackedBy,
   unknownColumns,
@@ -41,6 +43,7 @@ const remapping = ref<string | null>(null);
 const removing = ref<RootFolderTarget[] | null>(null);
 const operation = ref<{ operation: DiskOperation; target: string } | null>(null);
 const creating = ref<{ parent: string; source: string } | null>(null);
+const pruning = ref<PathNode[] | null>(null);
 
 const selected = ref<string[]>([]);
 
@@ -83,6 +86,14 @@ const rootable = computed(() => selectedNodes.value.filter((node) => node.canAdd
 const deletable = computed<RootFolderTarget[]>(() =>
   selectedNodes.value.flatMap((node) => rootFolderTargets(node)),
 );
+
+/**
+ * The selected folders a delete may actually be staged for.
+ *
+ * Usually fewer than are selected - a mount, or a folder an instance still holds media under,
+ * is not deletable - so the button says how many and the toolbar says how many were left out.
+ */
+const prunable = computed(() => prunableFolders(selectedNodes.value));
 
 function toggleSelected(path: string): void {
   selected.value = selected.value.includes(path)
@@ -413,6 +424,14 @@ environment:
         >
           {{ selected.length }} row(s) selected - clear
         </button>
+        <span
+          v-if="selected.length > 0 && prunable.length < selected.length"
+          class="text-[11px] text-faint"
+          data-testid="prunable-count"
+          title="A mount, or a folder an instance still holds media under, is not deletable - and a folder inside another selected one goes with its parent"
+        >
+          {{ prunable.length }} of them can be deleted
+        </span>
 
         <div class="ml-auto flex flex-wrap items-center gap-2">
           <BaseButton size="sm" :loading="paths.loading" @click="rescan">
@@ -451,6 +470,20 @@ environment:
             @click="removing = deletable"
           >
             Unassign ({{ deletable.length }})
+          </BaseButton>
+          <BaseButton
+            size="sm"
+            variant="danger"
+            data-testid="bulk-delete-open"
+            :disabled="prunable.length === 0"
+            :title="
+              prunable.length === 0
+                ? 'Select folders nothing roots at and no instance holds media under'
+                : `Delete ${prunable.length} folder(s) from disk`
+            "
+            @click="pruning = prunable"
+          >
+            Delete ({{ prunable.length }})
           </BaseButton>
         </div>
       </div>
@@ -612,10 +645,12 @@ environment:
         Folders are managed here in their own right - this view does not compare a folder
         across instances, because a folder normally belongs to one. Only leaf folders can be
         selected: a folder with subfolders under it is a place to look, not a thing to act
-        on, and the header checkbox takes exactly the rows in view. Disk operations are staged
-        like any other change: they land in Pending Fleet Changes, run in order with the *Arr
-        steps, and their preflight runs again immediately before execution. Symlinks are shown
-        but never followed or modified.
+        on, and the header checkbox takes exactly the rows in view. Deleting a selection stages
+        one operation per folder, each with its own preflight, so a folder that has changed by
+        the time the run reaches it fails alone rather than taking the batch with it. Disk
+        operations are staged like any other change: they land in Pending Fleet Changes, run in
+        order with the *Arr steps, and their preflight runs again immediately before execution.
+        Symlinks are shown but never followed or modified.
       </p>
     </template>
 
@@ -634,6 +669,12 @@ environment:
     />
     <RemapDialog v-if="remapping" :from-path="remapping" @close="remapping = null" />
     <RemoveRootFoldersDialog v-if="removing" :targets="removing" @close="removing = null" />
+    <BulkDeleteDialog
+      v-if="pruning"
+      :targets="pruning"
+      @staged="selected = selected.filter((path) => !$event.includes(path))"
+      @close="pruning = null"
+    />
     <DiskOperationModal
       v-if="operation"
       :operation="operation.operation"

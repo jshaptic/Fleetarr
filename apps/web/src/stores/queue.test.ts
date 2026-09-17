@@ -137,12 +137,15 @@ describe('fleet fan-out', () => {
     ]);
   });
 
-  it('a re-map chains create -> move -> delete with dependencies per instance', async () => {
+  it('a switch chains create -> move -> delete with dependencies per instance', async () => {
     const queue = useQueueStore();
 
     await queue.remapRootFolder({
+      fromPath: '/data/media',
       toPath: '/data/media-4k',
       moveFiles: true,
+      mkdirPath: null,
+      refreshAfter: false,
       targets: [
         { instanceId: 1, mediaIds: [10, 11], needsRootFolder: true, removeRootFolderId: 5 },
         { instanceId: 2, mediaIds: [20], needsRootFolder: false, removeRootFolderId: null },
@@ -173,8 +176,89 @@ describe('fleet fan-out', () => {
     expect(removals[0]).toMatchObject({
       instanceId: 1,
       op: 'rootFolder.delete',
-      payload: { rootFolderId: 5 },
+      // The real path, not a placeholder: it is what marks the old folder's row as pending.
+      payload: { rootFolderId: 5, path: '/data/media' },
       dependsOnId: 2,
+    });
+  });
+
+  it('a switch to a folder that is not on disk yet puts one mkdir at the head of the chain', async () => {
+    const queue = useQueueStore();
+
+    await queue.remapRootFolder({
+      fromPath: '/data/media',
+      toPath: '/data/media-4k',
+      moveFiles: true,
+      mkdirPath: '/data/media-4k',
+      refreshAfter: false,
+      targets: [
+        { instanceId: 1, mediaIds: [10], needsRootFolder: true, removeRootFolderId: 5 },
+        { instanceId: 2, mediaIds: [20], needsRootFolder: true, removeRootFolderId: 6 },
+      ],
+    });
+
+    // One disk step for the fleet, and both instances wait on it - *Arr refuses to register a
+    // root folder at a path that is not there.
+    expect(push.mock.calls[0]?.[0]).toEqual([
+      { op: 'fs.mkdir', payload: { path: '/data/media-4k', recursive: true } },
+    ]);
+    const creates = push.mock.calls[1]?.[0] ?? [];
+    expect(creates[0]).toMatchObject({ instanceId: 1, op: 'rootFolder.create', dependsOnId: 1 });
+    expect(creates[1]).toMatchObject({ instanceId: 2, op: 'rootFolder.create', dependsOnId: 1 });
+  });
+
+  it('an instance with nothing to move still gets its old root folder dropped, after the create', async () => {
+    const queue = useQueueStore();
+
+    await queue.remapRootFolder({
+      fromPath: '/data/media',
+      toPath: '/data/media-4k',
+      moveFiles: true,
+      mkdirPath: null,
+      refreshAfter: false,
+      targets: [
+        { instanceId: 1, mediaIds: [], needsRootFolder: true, removeRootFolderId: 5 },
+      ],
+    });
+
+    // No move item exists, so the cleanup hangs off the create instead of off nothing - the
+    // old root folder must never go before the new one is registered.
+    const moves = push.mock.calls[1]?.[0] ?? [];
+    expect(moves).toHaveLength(0);
+
+    const removals = push.mock.calls[2]?.[0] ?? [];
+    expect(removals[0]).toMatchObject({
+      instanceId: 1,
+      op: 'rootFolder.delete',
+      payload: { rootFolderId: 5, path: '/data/media' },
+      dependsOnId: 1,
+    });
+  });
+
+  it('a rescan, when asked for, waits on the move and covers only instances with media', async () => {
+    const queue = useQueueStore();
+
+    await queue.remapRootFolder({
+      fromPath: '/data/media',
+      toPath: '/data/media-4k',
+      moveFiles: false,
+      mkdirPath: null,
+      refreshAfter: true,
+      targets: [
+        { instanceId: 1, mediaIds: [10, 11], needsRootFolder: false, removeRootFolderId: null },
+        { instanceId: 2, mediaIds: [], needsRootFolder: false, removeRootFolderId: null },
+      ],
+    });
+
+    // Nobody needs a destination root folder here, so there is no create batch: the moves are
+    // the first push and the rescans the second.
+    const rescans = push.mock.calls[1]?.[0] ?? [];
+    expect(rescans).toHaveLength(1);
+    expect(rescans[0]).toMatchObject({
+      instanceId: 1,
+      op: 'media.refresh',
+      payload: { mediaIds: [10, 11] },
+      dependsOnId: 1,
     });
   });
 

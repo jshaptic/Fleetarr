@@ -74,7 +74,7 @@ const emit = defineEmits<{
 
 const ACTION_LABELS: Record<Exclude<PathAction, 'focus'>, string> = {
   addRoot: 'add root folder',
-  remap: 're-map',
+  remap: 'switch root folder',
   rename: 'rename',
   move: 'move',
   prune: 'remove',

@@ -114,6 +114,38 @@ const item = computed<NewFsQueueItem | null>(() => {
   }
 });
 
+/**
+ * Whether either delete option is worth asking about at all.
+ *
+ * The preflight already answers both questions, so the dialog reads its verdict rather than
+ * offering every option every time: an empty folder nothing references used to render two
+ * irreversible-sounding checkboxes that changed nothing.
+ *
+ * Both are stable under their own checkbox. Ticking `recursive` turns the `recursive_required`
+ * blocker into the `recursive_delete` warning, and an empty directory reports `empty` either
+ * way - so neither can flicker as the re-run preflight comes back.
+ */
+const needsRecursive = computed(
+  () =>
+    preflight.value?.checks.some(
+      (check) => check.id === 'recursive_required' || check.id === 'recursive_delete',
+    ) ?? false,
+);
+
+const needsForce = computed(
+  () =>
+    preflight.value?.checks.some(
+      (check) => check.id === 'referenced_by_arr' && check.status !== 'ok',
+    ) ?? false,
+);
+
+// A hidden option must not keep a `true` in the payload it no longer explains. Guarded so the
+// write cannot re-trigger the watch that produced the verdict in the first place.
+watch([needsRecursive, needsForce], ([recursiveNeeded, forceNeeded]) => {
+  if (!recursiveNeeded && recursive.value) recursive.value = false;
+  if (!forceNeeded && force.value) force.value = false;
+});
+
 const blockers = computed(() => preflight.value?.checks.filter((check) => check.status === 'blocker') ?? []);
 const warnings = computed(() => preflight.value?.checks.filter((check) => check.status === 'warning') ?? []);
 const passed = computed(() => preflight.value?.checks.filter((check) => check.status === 'ok') ?? []);
@@ -365,15 +397,20 @@ watch([name, destination, recursive, force], () => void check());
           This deletes the folder and everything under it from disk. Fleetarr has no recycle
           bin - once the queue applies this step, the only way back is your backups.
         </p>
-        <label class="flex items-start gap-2 text-xs text-muted">
-          <BaseCheckbox v-model="recursive" tone="danger" class="mt-0.5" />
+        <!--
+          Each option appears only when the preflight says it is needed. An empty folder no
+          instance references is the common case, and offering it two irreversible-sounding
+          choices that change nothing made it read like the dangerous one.
+        -->
+        <label v-if="needsRecursive" class="flex items-start gap-2 text-xs text-muted">
+          <BaseCheckbox v-model="recursive" data-testid="delete-recursive" tone="danger" class="mt-0.5" />
           <span>
             <span class="font-medium text-ink">Delete contents too</span>
             <span class="block text-[11px]">Required for a folder that is not empty.</span>
           </span>
         </label>
-        <label class="flex items-start gap-2 text-xs text-muted">
-          <BaseCheckbox v-model="force" tone="danger" class="mt-0.5" />
+        <label v-if="needsForce" class="flex items-start gap-2 text-xs text-muted">
+          <BaseCheckbox v-model="force" data-testid="delete-force" tone="danger" class="mt-0.5" />
           <span>
             <span class="font-medium text-ink">Delete even though an instance still tracks it</span>
             <span class="block text-[11px]">

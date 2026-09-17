@@ -146,12 +146,23 @@ function stageKeysFor(item: QueueItem): string[] {
       return [stageKey(item.instanceId, 'tag', item.payload.label)];
     case 'tag.merge':
       return [stageKey(item.instanceId, 'tag', item.targetLabel)];
+    // Two keys each: the owner chip in the Used by column reads the per-instance one, and
+    // the folder row's own staged glyph reads the path one. Without the second, a root-folder
+    // switch that stages no disk step at all marks neither folder as pending.
     case 'rootFolder.create':
-      return [stageKey(item.instanceId, 'rootFolder', item.payload.path)];
     case 'rootFolder.delete':
-      return [stageKey(item.instanceId, 'rootFolder', item.payload.path)];
+      return [
+        stageKey(item.instanceId, 'rootFolder', item.payload.path),
+        stageKey(null, 'path', item.payload.path),
+      ];
     case 'media.moveRootFolder':
-      return [stageKey(item.instanceId, 'rootFolder', item.payload.toRootFolderPath)];
+      // Only the destination: the source path is not in the payload, and putting it there
+      // would be a queue contract change plus a migration for a second glyph. The old folder
+      // is already marked by the `rootFolder.delete` that follows.
+      return [
+        stageKey(item.instanceId, 'rootFolder', item.payload.toRootFolderPath),
+        stageKey(null, 'path', item.payload.toRootFolderPath),
+      ];
     case 'importList.create':
       return [stageKey(item.instanceId, 'importList', item.payload.name)];
     case 'importList.update':
@@ -322,7 +333,12 @@ export const useQueueStore = defineStore('queue', () => {
   const stagedForImportListName = (instanceId: number, name: string): QueueItem[] =>
     stagedIndex.value.get(stageKey(instanceId, 'importList', name)) ?? [];
 
-  /** Staged disk work touching a path - drives the storage explorer badges. */
+  /**
+   * Staged work touching a path - drives the folder rows' pending glyph.
+   *
+   * Not only disk work: a root folder added or dropped at a path is a staged change to that
+   * folder as far as the tree is concerned, even though nothing on disk moves.
+   */
   const stagedForPath = (target: string): QueueItem[] =>
     stagedIndex.value.get(stageKey(null, 'path', target)) ?? [];
 
@@ -488,24 +504,46 @@ export const useQueueStore = defineStore('queue', () => {
   }
 
   /**
-   * Multi-instance path re-map, staged as a dependent chain per instance:
-   *   create destination (if missing) -> move media -> remove the old root folder.
+   * Switch a root folder to another folder, staged as a dependent chain per instance:
+   *   create the folder on disk (if it is not there) -> create the destination root folder
+   *   -> move the media -> optionally rescan -> remove the old root folder.
+   *
    * Each step depends on the previous one, so a failed move can never be followed by the
-   * deletion of the folder the media is still in.
+   * removal of the folder the media is still in. The disk step is shared: one `fs.mkdir` that
+   * every instance's `rootFolder.create` waits on, because *Arr refuses to register a root
+   * folder at a path that does not exist.
    */
   async function remapRootFolder(params: {
     targets: readonly RemapTarget[];
+    /** The root folder being left, named so the queue rows and the tree agree on which one. */
+    fromPath: string;
     toPath: string;
     moveFiles: boolean;
+    /**
+     * Set when the destination is not on disk yet. Null when it already is - `fs.mkdir`
+     * treats an existing target as a blocker, so staging one anyway would pause the run at
+     * step one and skip the whole chain behind it.
+     */
+    mkdirPath: string | null;
+    refreshAfter: boolean;
   }): Promise<void> {
-    const { targets, toPath, moveFiles } = params;
+    const { targets, fromPath, toPath, moveFiles, mkdirPath, refreshAfter } = params;
     if (targets.length === 0) {
-      ui.notify('info', 'Nothing to re-map');
+      ui.notify('info', 'Nothing to switch');
       return;
     }
 
     busy.value = true;
     try {
+      // Step 0: the folder itself, once for the fleet.
+      let mkdirId: number | undefined;
+      if (mkdirPath !== null) {
+        const response = await queueApi.push([
+          { op: 'fs.mkdir' as const, payload: { path: mkdirPath, recursive: true } },
+        ]);
+        mkdirId = response.items[0]?.id;
+      }
+
       // Step 1: destinations that do not exist yet. Their ids are needed as dependencies,
       // so this batch goes first and on its own.
       const creators = targets.filter((target) => target.needsRootFolder);
@@ -517,6 +555,7 @@ export const useQueueStore = defineStore('queue', () => {
             instanceId: target.instanceId,
             op: 'rootFolder.create' as const,
             payload: { path: toPath },
+            ...(mkdirId === undefined ? {} : { dependsOnId: mkdirId }),
           })),
         );
         for (const item of response.items) {
@@ -545,18 +584,49 @@ export const useQueueStore = defineStore('queue', () => {
 
       const moveByInstance = new Map(moveResponse.items.map((item) => [item.instanceId, item.id]));
 
-      // Step 3: optional cleanup of the old root folder, gated on its move succeeding.
+      /**
+       * What the next step waits on, per instance.
+       *
+       * The move when there was one; otherwise that instance's `rootFolder.create`, or the
+       * shared mkdir. An instance rooting at an empty folder has nothing to move, and hanging
+       * its cleanup off nothing would let the old root folder go before the new one existed.
+       */
+      const gate = (target: RemapTarget): number | undefined =>
+        moveByInstance.get(target.instanceId) ?? created.get(target.instanceId) ?? mkdirId;
+
+      // Step 3: optionally make the instance read the new paths. Off by default when the
+      // files are moving, because *Arr answers the editor PUT before the move has run.
+      if (refreshAfter) {
+        const rescans = targets.filter((target) => target.mediaIds.length > 0);
+        if (rescans.length > 0) {
+          await queueApi.push(
+            rescans.map((target): NewQueueItem => {
+              const dependsOnId = gate(target);
+              return {
+                instanceId: target.instanceId,
+                op: 'media.refresh',
+                payload: { mediaIds: [...target.mediaIds] },
+                ...(dependsOnId === undefined ? {} : { dependsOnId }),
+              };
+            }),
+          );
+        }
+      }
+
+      // Step 4: optional cleanup of the old root folder, gated on its move succeeding.
       const removals = targets.filter((target) => target.removeRootFolderId !== null);
       if (removals.length > 0) {
         await queueApi.push(
           removals.map((target): NewQueueItem => {
-            const dependsOnId = moveByInstance.get(target.instanceId);
+            const dependsOnId = gate(target);
             return {
               instanceId: target.instanceId,
               op: 'rootFolder.delete',
               payload: {
                 rootFolderId: target.removeRootFolderId ?? 0,
-                path: '(old root folder)',
+                // The real path, not a placeholder: it is what the queue row reads and what
+                // the old folder's row and owner chip match on to show the change as pending.
+                path: fromPath,
               },
               ...(dependsOnId === undefined ? {} : { dependsOnId }),
             };
@@ -567,11 +637,11 @@ export const useQueueStore = defineStore('queue', () => {
       await load();
       ui.notify(
         'success',
-        `Staged re-map to ${toPath} across ${String(targets.length)} instance(s)${moveFiles ? ' - files will move on disk' : ''}`,
+        `Staged the switch from ${fromPath} to ${toPath} across ${String(targets.length)} instance(s)${moveFiles ? ' - *Arr will move the files' : ''}`,
       );
       ui.openDrawer();
     } catch (caught) {
-      ui.notify('error', `Could not stage the re-map: ${messageOf(caught)}`);
+      ui.notify('error', `Could not stage the switch: ${messageOf(caught)}`);
       await load();
     } finally {
       busy.value = false;
@@ -583,6 +653,20 @@ export const useQueueStore = defineStore('queue', () => {
   /** One disk operation, staged like any other change. */
   function stageFsOperation(item: NewFsQueueItem, description: string): Promise<QueueItem[]> {
     return push([item], description);
+  }
+
+  /**
+   * Several disk operations in one batch.
+   *
+   * One `fs.delete` per folder rather than a list in one payload: each one carries its own
+   * preflight, its own result and its own row, so a folder that turns out to be unsafe by the
+   * time the run reaches it fails alone instead of taking the others with it.
+   */
+  function stageFsOperations(
+    items: readonly NewFsQueueItem[],
+    description: string,
+  ): Promise<QueueItem[]> {
+    return push([...items], description);
   }
 
   /**
@@ -1173,6 +1257,7 @@ export const useQueueStore = defineStore('queue', () => {
     updateImportListsAcross,
     createImportListAcross,
     stageFsOperation,
+    stageFsOperations,
     stageReconcile,
     reorder,
     move,

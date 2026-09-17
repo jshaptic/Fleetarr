@@ -18,6 +18,7 @@ import {
   ownerFacts,
   ownerHeadline,
   ownerMedia,
+  prunableFolders,
   alignTargetsFor,
   rootFolderTargets,
   SEVERITY_STYLES,
@@ -352,6 +353,16 @@ describe('actionsFor', () => {
     expect(actions).not.toContain('remap');
   });
 
+  it('offers a switch on a root folder nothing has been downloaded into yet', () => {
+    // Use is structural, not a consequence of downloading: an empty, freshly configured root
+    // folder is precisely the one worth re-pointing before a library lands in it.
+    const target = flagged('/data/media/tv', ['rootFolder'], [
+      owner(1, 'rootFolder', { mediaUnder: 0 }),
+    ]);
+
+    expect(actionsFor(target)).toContain('remap');
+  });
+
   it('offers addRoot only when the server says the path could take one', () => {
     // The server owns this decision: it is the only side that knows every instance's
     // root folders, and the old client-side version needed a target selection to guess.
@@ -665,5 +676,42 @@ describe('the owner card', () => {
       '/data/media',
     );
     expect(parent[0]).toMatchObject({ label: 'Used for', value: '1 root folder below' });
+  });
+});
+
+describe('prunableFolders', () => {
+  it('keeps only what actionsFor would offer a prune on', () => {
+    const spare = node('/data/media/spare', { owners: [] });
+    const mount = node('/data', { flags: ['mount'] });
+    const tracked = node('/data/media/movies/Dune (2021)', {
+      owners: [owner(1, 'tracked', { mediaUnder: 1 })],
+    });
+
+    expect(prunableFolders([spare, mount, tracked])).toEqual([spare]);
+  });
+
+  it('drops a selected folder that another selected folder already contains', () => {
+    // The parent's recursive delete takes the child with it, so staging both would leave the
+    // second one failing its re-run preflight and pausing the whole batch.
+    const parent = node('/data/media/spare', { owners: [] });
+    const child = node('/data/media/spare/2019', { owners: [] });
+
+    expect(prunableFolders([parent, child])).toEqual([parent]);
+    expect(prunableFolders([child, parent])).toEqual([parent]);
+  });
+
+  it('keeps siblings, and is not fooled by a shared name prefix', () => {
+    const spare = node('/data/media/spare', { owners: [] });
+    const spares = node('/data/media/spares', { owners: [] });
+
+    expect(prunableFolders([spare, spares])).toEqual([spare, spares]);
+  });
+
+  it('keeps a child whose parent was selected but is not itself prunable', () => {
+    // The parent is a mount, so nothing recursive is coming for the child.
+    const mount = node('/data', { flags: ['mount'] });
+    const child = node('/data/spare', { owners: [] });
+
+    expect(prunableFolders([mount, child])).toEqual([child]);
   });
 });
