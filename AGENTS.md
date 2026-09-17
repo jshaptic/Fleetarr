@@ -14,15 +14,16 @@ Keep this file under 200 lines. Tighten existing rules rather than adding sectio
 - **ALWAYS reuse `components/base`.** Invent a new component only when nothing there fits.
 - **NEVER draw an instance's initials or its app colour by hand.** `BaseInstanceBadge` is
   the only one; its test fails the build if `initialsOf` or the palette is named elsewhere.
-- **NEVER import an icon library outside `components/base/icons/glyphs.ts`.** Every other
-  file asks for a meaning (`IconWarning`) and a weight (`variant="solid"`), never a
-  drawing; `icons.test.ts` fails the build if anything else names `@remixicon/vue`.
+- **NEVER import an icon library outside `components/base/icons/glyphs.ts`.** Every other file
+  asks for a meaning (`IconWarning`) and a weight, never a drawing; `icons.test.ts` pins it.
 - **NEVER add a `<style>` block.** Utility classes only; `icons.test.ts` pins that at zero.
 - **NEVER hand-roll a checkbox.** `BaseCheckbox` is the only one, and it keeps a real
   `<input type="checkbox">` under a drawn box.
-- **NEVER hand-roll a picker, a `<datalist>` or a `<select>`.** `BaseSelect` is the only
-  one: `editable` means what you type is the value (a path), the default means only an
-  option is. `BaseSelect.test.ts` fails the build on any of the three.
+- **NEVER hand-roll a severity line.** `BaseNotice` is the only one: a tone picks colour and
+  glyph, a fixed rail aligns prose across tones, and the slot is one element - a flex row
+  makes an anonymous item per text run, so a hand-written `<em>` splits the sentence.
+- **NEVER hand-roll a picker, a `<datalist>` or a `<select>`.** `BaseSelect` is the only one:
+  `editable` means what you type is the value (a path), the default means only an option is.
 - **ALWAYS run `npm run typecheck` and `npm test`** before calling work done.
 
 ## Project context
@@ -104,8 +105,8 @@ than in a column. A low-space warning only ever lands on a mount or a root folde
 - **Filtering is server-side**, and so is every count beside it: a client-side filter would
   leave the summary describing rows it had just removed.
 - **Apply `only`, `q` and `limit` before any per-child `stat`.** A level of 64 or fewer is
-  served whole and fully probed; a bigger one defaults to problems-only. `empty` and
-  `no access` need a read per child, so on a big level they report `null`, not zero.
+  served whole and fully probed; a bigger one defaults to problems-only. `empty` and `no
+  access` need a read per child, so on a big level they report `null`, not zero.
 - **The parser lives in `@fleetarr/shared`** so both sides share the verdict: `path-filter.ts`
   for folders, `media-filter.ts` for titles, `expandBraces` for values in both.
 - Folders on the way to a match stay visible and **dimmed**; mounts and anything with a
@@ -120,8 +121,7 @@ than in a column. A low-space warning only ever lands on a mount or a root folde
   `title`-basis row is a guess and says so. One line each: kind, links and size have columns.
 - **No row actions.** A bulk operation acts on the **matching** facets only - so
   `monitored:false instance:radarr-4k` then delete cannot touch Radarr-HD - while every chip
-  still renders. The list pages; the header checkbox selects the whole match via
-  `GET /media/ids`, never the loaded page.
+  still renders. The header checkbox selects the whole match via `GET /media/ids`, not the page.
 - **A filter verdict has three values.** Sonarr exposes no `importlist/series`, so `list:X`
   and `NOT list:X` are both unanswerable there. Deliberately **no boolean helper** collapses
   it; undecided rows are counted with their reason, never mixed in with the non-matches.

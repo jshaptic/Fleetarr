@@ -5,9 +5,10 @@ import BaseButton from '@/components/base/BaseButton.vue';
 import BaseCheckbox from '@/components/base/BaseCheckbox.vue';
 import BaseSelect from '@/components/base/BaseSelect.vue';
 import BaseModal from '@/components/base/BaseModal.vue';
+import BaseInstanceBadge from '@/components/base/BaseInstanceBadge.vue';
+import BaseNotice from '@/components/base/BaseNotice.vue';
 import IconCreate from '@/components/base/icons/IconCreate.vue';
-import IconError from '@/components/base/icons/IconError.vue';
-import IconWarning from '@/components/base/icons/IconWarning.vue';
+import IconUnknown from '@/components/base/icons/IconUnknown.vue';
 import { formatBytes } from '@/lib/format';
 import { rewritePathPrefix } from '@/lib/fs-tree';
 import { rootFolderOwners } from '@/lib/path-matrix';
@@ -142,6 +143,20 @@ const destinationFree = computed(
   () => destinationNode.value?.freeSpace ?? mkdirCheck.value?.freeSpace ?? null,
 );
 
+/**
+ * The tail of the cross-filesystem sentence, assembled here rather than from three chained
+ * `<template>` tags. Whether that comma had a space in front of it came down to where the
+ * newlines fell between the tags, which is not a thing to decide by indentation.
+ */
+const crossDeviceDetail = computed(() => {
+  const parts: string[] = [];
+  if (sourceSize.value !== null) parts.push(`${formatBytes(sourceSize.value)} to move`);
+  if (destinationFree.value !== null) {
+    parts.push(`${formatBytes(destinationFree.value)} free there`);
+  }
+  return parts.length === 0 ? '' : ` - ${parts.join(', ')}`;
+});
+
 const tooLittleSpace = computed(
   () =>
     crossDevice.value &&
@@ -189,16 +204,58 @@ const chosen = computed(() =>
   candidates.value.filter((candidate) => included.value.includes(candidate.instanceId)),
 );
 
+/**
+ * How many items an instance has under this folder, or `null` when that is not known -
+ * still counting, or the count failed. Deliberately not `0` for either: a zero is what
+ * decides that no files move and that no move step is staged, and neither conclusion may
+ * be drawn from a question nobody answered.
+ */
+function itemsUnder(instanceId: number): number | null {
+  const count = counts.value[instanceId];
+  return typeof count === 'number' ? count : null;
+}
+
+/** Only a counted zero cancels the move; an unknown count stages one and lets *Arr say. */
+function movesMedia(instanceId: number): boolean {
+  return itemsUnder(instanceId) !== 0;
+}
+
 const totalMedia = computed(() =>
-  chosen.value.reduce((sum, candidate) => {
-    const count = counts.value[candidate.instanceId];
-    return sum + (typeof count === 'number' ? count : 0);
-  }, 0),
+  chosen.value.reduce((sum, candidate) => sum + (itemsUnder(candidate.instanceId) ?? 0), 0),
 );
 
 const counting = computed(() =>
   candidates.value.some((candidate) => counts.value[candidate.instanceId] === 'loading'),
 );
+
+const countsFailed = computed(
+  () => chosen.value.filter((candidate) => counts.value[candidate.instanceId] === 'error').length,
+);
+
+/**
+ * Which relocation story to tell, because "*Arr will physically relocate 0 item(s)" is
+ * three different situations wearing one sentence, and two of them are not warnings at all.
+ *
+ * A root folder with nothing under it is the ordinary case for a freshly configured
+ * instance, and switching it moves no bytes - it is a create and a delete. Saying it is
+ * slow and cannot be undone is simply false there, and a red box that cries wolf on the
+ * harmless case is how the one that matters stops being read. A count that has not landed
+ * yet, or that failed, is not a zero either: those get their own line rather than being
+ * rounded down into one.
+ */
+const relocation = computed<'counting' | 'unknown' | 'none' | 'some'>(() => {
+  if (counting.value) return 'counting';
+  if (countsFailed.value > 0) return 'unknown';
+  return totalMedia.value > 0 ? 'some' : 'none';
+});
+
+const allSelected = computed(
+  () => candidates.value.length > 0 && included.value.length === candidates.value.length,
+);
+
+function toggleAll(): void {
+  included.value = allSelected.value ? [] : candidates.value.map((c) => c.instanceId);
+}
 
 /**
  * No `totalMedia > 0` requirement: a configured but still empty root folder is precisely the
@@ -221,14 +278,12 @@ const stepCount = computed(
   () =>
     (mkdirPath.value === null ? 0 : 1) +
     chosen.value.reduce((sum, candidate) => {
-      const items = typeof counts.value[candidate.instanceId] === 'number'
-        ? (counts.value[candidate.instanceId] as number)
-        : 0;
+      const moves = movesMedia(candidate.instanceId);
       return (
         sum +
         (candidate.hasDestination ? 0 : 1) +
-        (items > 0 ? 1 : 0) +
-        (items > 0 && refreshAfter.value ? 1 : 0) +
+        (moves ? 1 : 0) +
+        (moves && refreshAfter.value ? 1 : 0) +
         listTargetsFor(candidate.instanceId).length +
         (removeOld.value && candidate.oldRootFolderId !== null ? 1 : 0)
       );
@@ -348,9 +403,25 @@ watch(crossDevice, (crosses) => {
     width="lg"
     @close="emit('close')"
   >
-    <div class="space-y-4">
-      <div>
-        <label class="mb-1 block text-xs text-muted" for="switch-destination">Destination folder</label>
+    <div class="space-y-5">
+      <!--
+        Four sections in the order the decision is made: where to, who moves, how, and then
+        the chain in words. The warnings were the thing that read as awkward, and the cause
+        was placement rather than wording - the acknowledgement for "the folder is not empty"
+        sat outside the box holding the sentence it answered, and the red relocation warning
+        shared a box with two unrelated option checkboxes, which made a danger tint the
+        background of an ordinary setting. Each notice now sits inside the section whose
+        facts produced it.
+      -->
+      <section class="space-y-2">
+        <!-- A real `for`, not a heading that looks like one: BaseSelect renders the input. -->
+        <label
+          class="block text-[10px] font-semibold tracking-wide text-faint uppercase"
+          for="switch-destination"
+        >
+          Destination
+        </label>
+
         <BaseSelect
           id="switch-destination"
           v-model="toPath"
@@ -365,82 +436,116 @@ watch(crossDevice, (crosses) => {
           browse-label="Pick from the folders on disk"
           empty-hint="No folder on disk matches - type the path and the check below will judge it"
         />
-      </div>
 
-      <!-- what the disk says about that path -->
-      <div
-        v-if="destination.length > 0"
-        class="space-y-1 rounded-md border border-line bg-raised/40 px-3 py-2 text-[11px]"
-        data-testid="destination-verdict"
-      >
-        <p v-if="checking" class="text-faint">checking the destination…</p>
-        <template v-else>
-          <p v-if="destinationUnusable" class="flex gap-2 text-danger">
-            <IconError class="mt-0.5" /> {{ destinationUnusable }}
-          </p>
-          <p v-for="check in mkdirBlockers" :key="check.id" class="flex gap-2 text-danger">
-            <IconError class="mt-0.5" /> {{ check.message }}
-          </p>
-          <p v-if="mkdirPath !== null" class="flex gap-2 text-sync" data-testid="will-mkdir">
-            <IconCreate size="xs" class="mt-0.5" />
-            Not on disk yet - it will be created first, before any instance is told about it.
-          </p>
-          <p v-else-if="destinationEmptiness === 'empty'" class="text-muted">
-            The folder is there and empty.
-          </p>
-          <p v-else-if="destinationEmptiness === 'unknown'" class="text-muted">
-            The folder is there. Fleetarr has not counted its contents, so it cannot say whether
-            it is empty - deliberately not "it is".
-          </p>
-          <p v-else class="flex gap-2 text-drift" data-testid="destination-occupied">
-            <IconWarning class="mt-0.5" />
-            The folder already has something in it. *Arr will move this library in alongside
-            whatever is there.
-          </p>
-          <p v-if="crossDevice" class="flex gap-2 text-drift">
-            <IconWarning class="mt-0.5" />
-            That is a different filesystem, so *Arr copies rather than renames<template v-if="sourceSize !== null">
-              - {{ formatBytes(sourceSize) }} to move</template><template v-if="destinationFree !== null">, {{ formatBytes(destinationFree) }} free there</template>.
-          </p>
-          <p v-if="tooLittleSpace" class="flex gap-2 text-danger">
-            <IconWarning class="mt-0.5" /> There is less free space there than this folder holds.
-          </p>
-        </template>
-      </div>
+        <!-- what the disk says about that path, and the one question it can raise -->
+        <div
+          v-if="destination.length > 0"
+          class="space-y-1.5 rounded-md border border-line bg-raised/40 px-3 py-2"
+          data-testid="destination-verdict"
+        >
+          <BaseNotice v-if="checking">checking the destination…</BaseNotice>
+          <template v-else>
+            <BaseNotice v-if="destinationUnusable" tone="danger">
+              {{ destinationUnusable }}
+            </BaseNotice>
+            <BaseNotice v-for="check in mkdirBlockers" :key="check.id" tone="danger">
+              {{ check.message }}
+            </BaseNotice>
 
-      <label
-        v-if="destinationEmptiness === 'occupied' && destinationUnusable === null"
-        class="flex items-start gap-2 text-xs"
-      >
-        <BaseCheckbox v-model="acknowledgeNotEmpty" data-testid="acknowledge-not-empty" tone="danger" class="mt-0.5" />
-        <span>
-          <span class="font-medium text-ink">Move into it anyway</span>
-          <span class="block text-[11px] text-muted">
-            Merging two libraries into one folder is a legitimate thing to want, and an accident
-            worth one click.
-          </span>
-        </span>
-      </label>
+            <BaseNotice v-if="mkdirPath !== null" tone="sync" :icon="IconCreate" data-testid="will-mkdir">
+              Not on disk yet - it will be created first, before any instance is told about it.
+            </BaseNotice>
+            <BaseNotice v-else-if="destinationEmptiness === 'empty'" tone="sync">
+              The folder is there and empty.
+            </BaseNotice>
+            <BaseNotice v-else-if="destinationEmptiness === 'unknown'" :icon="IconUnknown">
+              The folder is there. Fleetarr has not counted its contents, so it cannot say
+              whether it is empty - deliberately not "it is".
+            </BaseNotice>
+            <BaseNotice v-else tone="warn" data-testid="destination-occupied">
+              The folder already has something in it. *Arr will move this library in alongside
+              whatever is there.
+            </BaseNotice>
 
-      <div>
-        <p class="mb-1.5 text-xs text-muted">
-          Instances rooting at {{ props.fromPath }}
-          <span v-if="!fleetReady" class="text-faint">· reading the fleet…</span>
-        </p>
-        <ul class="space-y-1">
-          <li v-for="candidate in candidates" :key="candidate.instanceId">
+            <BaseNotice v-if="crossDevice" tone="warn">
+              That is a different filesystem, so *Arr copies rather than
+              renames{{ crossDeviceDetail }}.
+            </BaseNotice>
+            <BaseNotice v-if="tooLittleSpace" tone="danger">
+              There is less free space there than this folder holds.
+            </BaseNotice>
+
+            <!--
+              The acknowledgement belongs under the sentence it acknowledges, not two blocks
+              below it with a heading in between.
+            -->
             <label
-              class="flex items-center justify-between gap-3 rounded border border-line bg-raised/60 px-2.5 py-1.5 text-xs"
+              v-if="destinationEmptiness === 'occupied' && destinationUnusable === null"
+              class="mt-1.5 flex items-start gap-2 border-t border-line/60 pt-2 text-xs"
             >
-              <span class="flex items-center gap-2">
+              <BaseCheckbox
+                v-model="acknowledgeNotEmpty"
+                data-testid="acknowledge-not-empty"
+                tone="danger"
+                class="mt-0.5"
+              />
+              <span>
+                <span class="font-medium text-ink">Move into it anyway</span>
+                <span class="block text-[11px] leading-relaxed text-muted">
+                  Merging two libraries into one folder is a legitimate thing to want, and an
+                  accident worth one click.
+                </span>
+              </span>
+            </label>
+          </template>
+        </div>
+      </section>
+
+      <section class="space-y-2">
+        <div class="flex items-baseline justify-between gap-3">
+          <p class="text-[10px] font-semibold tracking-wide text-faint uppercase">
+            Instances rooting at <span class="font-mono normal-case">{{ props.fromPath }}</span>
+          </p>
+          <!-- Only worth a control when there is more than one thing for it to act on. -->
+          <label
+            v-if="candidates.length > 1"
+            class="flex items-center gap-1.5 text-[11px] text-muted"
+          >
+            <BaseCheckbox
+              :model-value="allSelected"
+              :indeterminate="included.length > 0 && !allSelected"
+              data-testid="select-all-instances"
+              @change="toggleAll()"
+            />
+            all
+          </label>
+        </div>
+
+        <ul v-if="candidates.length > 0" class="space-y-1">
+          <li v-for="candidate in candidates" :key="candidate.instanceId">
+            <!--
+              The row is the hit area and it says which state it is in. Unselected is dimmed
+              rather than hidden: which instances root here is a fact about the folder, and
+              it stays legible whether or not this switch touches them.
+            -->
+            <label
+              class="flex cursor-pointer items-center justify-between gap-3 rounded-md border px-2.5 py-2 text-xs transition-colors"
+              :class="
+                included.includes(candidate.instanceId)
+                  ? 'border-accent/40 bg-accent/5'
+                  : 'border-line bg-raised/40 opacity-60 hover:opacity-100'
+              "
+            >
+              <span class="flex min-w-0 items-center gap-2">
                 <BaseCheckbox
                   :model-value="included.includes(candidate.instanceId)"
                   @change="toggle(candidate.instanceId)"
                 />
-                {{ candidate.name }}
-                <span class="text-[10px] text-faint uppercase">{{ candidate.kind }}</span>
+                <BaseInstanceBadge :name="candidate.name" :kind="candidate.kind" size="sm" />
+                <span class="truncate text-ink">{{ candidate.name }}</span>
               </span>
-              <span class="flex items-center gap-2 text-[11px]">
+
+              <span class="flex shrink-0 items-center gap-1.5 text-[11px]">
                 <span
                   v-if="destination.length > 0 && !candidate.hasDestination"
                   class="rounded border border-sync/40 bg-sync/10 px-1.5 py-0.5 text-sync"
@@ -448,94 +553,129 @@ watch(crossDevice, (crosses) => {
                 >
                   <IconCreate size="xs" /> root folder
                 </span>
-                <span class="text-muted">
+                <span
+                  class="rounded border border-line px-1.5 py-0.5 tabular-nums"
+                  :class="
+                    counts[candidate.instanceId] === 'error' ? 'text-danger' : 'text-muted'
+                  "
+                >
                   <template v-if="counts[candidate.instanceId] === 'loading'">counting…</template>
                   <template v-else-if="counts[candidate.instanceId] === 'error'">
-                    <span class="text-danger">count failed</span>
+                    count failed
                   </template>
-                  <template v-else>{{ counts[candidate.instanceId] ?? 0 }} item(s)</template>
+                  <template v-else>{{ itemsUnder(candidate.instanceId) ?? 0 }} item(s)</template>
                 </span>
               </span>
             </label>
           </li>
         </ul>
-        <p v-if="candidates.length === 0" class="text-[11px] text-muted">
+        <p v-else class="rounded-md border border-dashed border-line px-3 py-2 text-[11px] text-muted">
           No instance roots at this folder.
         </p>
-      </div>
 
-      <div class="space-y-2 rounded-md border border-line bg-raised/40 px-3 py-2.5">
-        <p class="flex gap-2 text-[11px] leading-relaxed text-danger">
-          <IconWarning class="mt-0.5" />
-          <span>
+        <!--
+          One line about what happens to the bytes, and it is the truth for the case at hand.
+          A counted zero is not a warning at all - it is the ordinary state of a root folder
+          nothing has been downloaded into yet, and the switch is a create and a delete.
+        -->
+        <BaseNotice
+          v-if="chosen.length > 0"
+          :tone="relocation === 'some' ? 'danger' : relocation === 'unknown' ? 'warn' : 'neutral'"
+          variant="panel"
+          data-testid="relocation-notice"
+        >
+          <template v-if="relocation === 'counting'">
+            Counting what each instance has under this folder…
+          </template>
+          <template v-else-if="relocation === 'unknown'">
+            Fleetarr could not count {{ countsFailed }} of the selected instance(s), so it cannot
+            say how much moves - only that whatever is there will be relocated by *Arr, which is
+            slow and cannot be undone from here.
+          </template>
+          <template v-else-if="relocation === 'none'">
+            Nothing is registered under this folder on the selected instance(s), so no files
+            move. This only re-points the registration: the destination is added, and
+            <span class="font-mono">{{ props.fromPath }}</span> is dropped.
+          </template>
+          <template v-else>
             *Arr will physically relocate {{ totalMedia }} item(s). This is slow and Fleetarr
             cannot undo it. If the files are <em>already</em> at the destination, close this and
             use rename &amp; align instead - that re-points without moving a byte.
-          </span>
-        </p>
+          </template>
+        </BaseNotice>
+      </section>
 
-        <label class="flex items-start gap-2 text-xs">
-          <BaseCheckbox v-model="removeOld" data-testid="remove-old" class="mt-0.5" />
-          <span>
-            <span class="font-medium text-ink">Stop rooting at {{ props.fromPath }}</span>
-            <span class="block text-[11px] leading-relaxed text-muted">
-              Staged as a dependent step - it only runs if that instance's move succeeded.
+      <section class="space-y-2">
+        <p class="text-[10px] font-semibold tracking-wide text-faint uppercase">Options</p>
+
+        <div class="space-y-2.5 rounded-md border border-line bg-raised/40 px-3 py-2.5">
+          <label class="flex items-start gap-2 text-xs">
+            <BaseCheckbox v-model="removeOld" data-testid="remove-old" class="mt-0.5" />
+            <span>
+              <span class="font-medium text-ink">Stop rooting at {{ props.fromPath }}</span>
+              <span class="block text-[11px] leading-relaxed text-muted">
+                Staged as a dependent step - it only runs if that instance's move succeeded.
+              </span>
             </span>
-          </span>
-        </label>
+          </label>
 
-        <label class="flex items-start gap-2 text-xs">
-          <BaseCheckbox v-model="refreshAfter" data-testid="refresh-after" class="mt-0.5" />
-          <span>
-            <span class="font-medium text-ink">Rescan afterwards</span>
-            <span class="block text-[11px] leading-relaxed text-muted">
-              Off by default: *Arr answers the move request before it has moved anything, so a
-              rescan staged behind it would read the new paths while the files are still in
-              flight and report the library missing.
+          <label class="flex items-start gap-2 text-xs">
+            <BaseCheckbox v-model="refreshAfter" data-testid="refresh-after" class="mt-0.5" />
+            <span>
+              <span class="font-medium text-ink">Rescan afterwards</span>
+              <span class="block text-[11px] leading-relaxed text-muted">
+                Off by default: *Arr answers the move request before it has moved anything, so a
+                rescan staged behind it would read the new paths while the files are still in
+                flight and report the library missing.
+              </span>
             </span>
-          </span>
-        </label>
-      </div>
+          </label>
+        </div>
 
-      <div
-        v-if="strandedLists.length > 0"
-        class="space-y-2 rounded-md border px-3 py-2.5 text-[11px]"
-        :class="repointLists ? 'border-line bg-raised/40' : 'border-drift/40 bg-drift/5'"
-        data-testid="stranded-lists"
-      >
-        <label class="flex items-start gap-2 text-xs">
-          <BaseCheckbox v-model="repointLists" data-testid="repoint-lists" class="mt-0.5" />
-          <span>
-            <span class="font-medium text-ink">
-              Aim {{ strandedLists.length }} import list(s) at the new folder
+        <div
+          v-if="strandedLists.length > 0"
+          class="space-y-2 rounded-md border px-3 py-2.5"
+          :class="repointLists ? 'border-line bg-raised/40' : 'border-drift/40 bg-drift/5'"
+          data-testid="stranded-lists"
+        >
+          <label class="flex items-start gap-2 text-xs">
+            <BaseCheckbox v-model="repointLists" data-testid="repoint-lists" class="mt-0.5" />
+            <span>
+              <span class="font-medium text-ink">
+                Aim {{ strandedLists.length }} import list(s) at the new folder
+              </span>
+              <span class="block text-[11px] leading-relaxed text-muted">
+                A list is what refills a folder after the media leaves it. Left pointing at
+                <span class="font-mono">{{ props.fromPath }}</span>, it undoes this switch one
+                sync at a time.
+              </span>
             </span>
-            <span class="block text-[11px] leading-relaxed text-muted">
-              A list is what refills a folder after the media leaves it. Left pointing at
-              <span class="font-mono">{{ props.fromPath }}</span>, it undoes this switch one sync
-              at a time.
-            </span>
-          </span>
-        </label>
+          </label>
 
-        <ul class="space-y-0.5 pl-6 font-mono text-[10px]">
-          <li v-for="list in strandedLists" :key="`${list.instanceId}-${list.importListId}`">
-            <span class="text-ink">{{ list.name }}</span>
-            <span class="text-faint"> {{ list.from }}</span>
-            <template v-if="repointLists && destination.length > 0">
-              <span class="text-faint"> → </span><span class="text-sync">{{ list.to }}</span>
-            </template>
-          </li>
-        </ul>
+          <ul class="space-y-0.5 pl-6 font-mono text-[10px]">
+            <li v-for="list in strandedLists" :key="`${list.instanceId}-${list.importListId}`">
+              <span class="text-ink">{{ list.name }}</span>
+              <span class="text-faint"> {{ list.from }}</span>
+              <template v-if="repointLists && destination.length > 0">
+                <span class="text-faint"> → </span><span class="text-sync">{{ list.to }}</span>
+              </template>
+            </li>
+          </ul>
 
-        <p v-if="!repointLists" class="flex gap-2 text-drift">
-          <IconWarning class="mt-0.5" />
-          Left alone, so re-point them on the instance yourself.
-        </p>
-      </div>
+          <BaseNotice v-if="!repointLists" tone="warn">
+            Left alone, so re-point them on the instance yourself.
+          </BaseNotice>
+        </div>
+      </section>
 
       <!-- the exact chain, in words -->
-      <div v-if="chosen.length > 0 && destination.length > 0" class="rounded-lg border border-staged/40 bg-staged/5 px-3 py-2.5">
-        <p class="mb-1.5 text-[11px] font-semibold text-staged">What will be staged</p>
+      <section
+        v-if="chosen.length > 0 && destination.length > 0"
+        class="rounded-lg border border-staged/40 bg-staged/5 px-3 py-2.5"
+      >
+        <p class="mb-1.5 text-[10px] font-semibold tracking-wide text-staged uppercase">
+          What will be staged
+        </p>
         <ol class="space-y-1 text-[11px] text-muted">
           <li v-if="mkdirPath !== null">
             <span class="font-mono text-ink">1.</span>
@@ -544,19 +684,36 @@ watch(crossDevice, (crosses) => {
           <li v-for="(candidate, index) in chosen" :key="candidate.instanceId">
             <span class="font-mono text-ink">{{ index + (mkdirPath === null ? 1 : 2) }}.</span>
             on {{ candidate.name }}:
-            <template v-if="!candidate.hasDestination">
-              add <span class="font-mono">{{ destination }}</span>,
+            <template v-if="!candidate.hasDestination"
+              >add <span class="font-mono">{{ destination }}</span
+              >,
             </template>
-            move its media there with <span class="font-mono text-danger">moveFiles: true</span><template v-if="refreshAfter">, rescan</template><template v-if="listTargetsFor(candidate.instanceId).length > 0">, re-aim {{ listTargetsFor(candidate.instanceId).length }} import list(s)</template><template v-if="removeOld && candidate.oldRootFolderId !== null">, then stop rooting at <span class="font-mono">{{ props.fromPath }}</span></template>
+            <!--
+              No move is staged for an instance counted at zero, so the chain must not claim
+              one - the queue would then be shorter than the sentence describing it.
+            -->
+            <template v-if="movesMedia(candidate.instanceId)"
+              >move its media there with
+              <span class="font-mono text-danger">moveFiles: true</span></template
+            ><template v-else>keep the registration only - it has nothing to move</template
+            ><template v-if="movesMedia(candidate.instanceId) && refreshAfter">, rescan</template
+            ><template v-if="listTargetsFor(candidate.instanceId).length > 0"
+              >, re-aim {{ listTargetsFor(candidate.instanceId).length }} import list(s)</template
+            ><template v-if="removeOld && candidate.oldRootFolderId !== null"
+              >, then stop rooting at <span class="font-mono">{{ props.fromPath }}</span></template
+            >
           </li>
         </ol>
         <p class="mt-2 text-[11px] leading-relaxed text-muted">
-          Applying this means *Arr <em>accepted</em> the move, not that it finished - the files
-          keep moving in the background. <span class="font-mono">{{ props.fromPath }}</span> is
-          left on disk; delete it from its own row once *Arr is done with it. If a step fails the
-          run pauses, which can leave one instance switched and another not.
+          <template v-if="relocation === 'some'">
+            Applying this means *Arr <em>accepted</em> the move, not that it finished - the files
+            keep moving in the background.
+          </template>
+          <span class="font-mono">{{ props.fromPath }}</span> is left on disk; delete it from its
+          own row once *Arr is done with it. If a step fails the run pauses, which can leave one
+          instance switched and another not.
         </p>
-      </div>
+      </section>
     </div>
 
     <template #footer>

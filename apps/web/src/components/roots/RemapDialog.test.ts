@@ -467,4 +467,55 @@ describe('RemapDialog', () => {
     expect(find('switch-confirm')?.hasAttribute('disabled')).toBe(false);
     wrapper.unmount();
   });
+
+  /**
+   * "*Arr will physically relocate 0 item(s). This is slow and cannot be undone" was the
+   * copy for the case where nothing happens at all. A red box on the harmless case is how
+   * the one that matters stops being read, and the chain below it claimed a move step the
+   * queue does not stage.
+   */
+  it('promises no relocation, and no move step, when there is nothing under the folder', async () => {
+    levelNodes.null = [
+      node(FROM, { flags: ['rootFolder'], owners: [owner(1, { mediaUnder: 0, mediaWithFiles: 0 })] }),
+    ];
+    const { resourcesApi } = await import('@/api/resources');
+    vi.mocked(resourcesApi.allMediaIdsInRootFolder).mockResolvedValue([]);
+
+    const wrapper = await mountDialog();
+    await destination('/data/media/4k');
+
+    const notice = find('relocation-notice');
+    expect(notice?.textContent).not.toContain('physically relocate');
+    expect(notice?.textContent).toContain('no files');
+    expect(document.body.textContent).toContain('nothing to move');
+    // The button counts the steps the queue will actually receive: mkdir, create and
+    // delete - no move.
+    expect(find('switch-confirm')?.textContent).toContain('Stage 3 step(s)');
+
+    find('switch-confirm')?.click();
+    for (let tick = 0; tick < 10; tick += 1) await flushPromises();
+
+    expect(
+      push.mock.calls.flatMap((call) => call[0]).filter((item) => item.op === 'media.moveRootFolder'),
+    ).toHaveLength(0);
+    vi.mocked(resourcesApi.allMediaIdsInRootFolder).mockResolvedValue([10, 11, 12]);
+    wrapper.unmount();
+  });
+
+  /** A count that failed is not a count of zero, and must not be rounded down into one. */
+  it('says it cannot tell how much moves when a count failed', async () => {
+    const { resourcesApi } = await import('@/api/resources');
+    vi.mocked(resourcesApi.allMediaIdsInRootFolder).mockRejectedValueOnce(new Error('nope'));
+
+    const wrapper = await mountDialog();
+    await destination('/data/media/4k');
+
+    const notice = find('relocation-notice');
+    expect(notice?.textContent).toContain('could not count');
+    expect(notice?.textContent).not.toContain('relocate 0 item(s)');
+    // The move is still staged - only a counted zero cancels it - so this is one more step
+    // than the same folder counted at zero.
+    expect(find('switch-confirm')?.textContent).toContain('Stage 4 step(s)');
+    wrapper.unmount();
+  });
 });
