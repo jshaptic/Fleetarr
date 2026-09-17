@@ -235,6 +235,41 @@ describe('fleet fan-out', () => {
     });
   });
 
+  it('re-aims an import list after the move, and skips the step when none was given', async () => {
+    const queue = useQueueStore();
+
+    await queue.remapRootFolder({
+      fromPath: '/data/media',
+      toPath: '/data/media-4k',
+      moveFiles: true,
+      mkdirPath: null,
+      refreshAfter: false,
+      targets: [
+        {
+          instanceId: 1,
+          mediaIds: [10],
+          needsRootFolder: false,
+          removeRootFolderId: null,
+          importLists: [{ importListId: 7, name: 'Trakt', toRootFolderPath: '/data/media-4k' }],
+        },
+        // No lists on this one: it must not produce an empty update.
+        { instanceId: 2, mediaIds: [20], needsRootFolder: false, removeRootFolderId: null },
+      ],
+    });
+
+    const updates = push.mock.calls
+      .flatMap((call) => call[0])
+      .filter((item) => item.op === 'importList.update');
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({
+      instanceId: 1,
+      payload: { importListId: 7, changes: { rootFolderPath: '/data/media-4k' } },
+      // The move for instance 1, so a failed move leaves the list pointing where it was.
+      dependsOnId: 1,
+    });
+  });
+
   it('a rescan, when asked for, waits on the move and covers only instances with media', async () => {
     const queue = useQueueStore();
 

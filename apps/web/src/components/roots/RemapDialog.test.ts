@@ -225,6 +225,11 @@ function find(testId: string): HTMLElement | null {
   return document.body.querySelector<HTMLElement>(`[data-testid="${testId}"]`);
 }
 
+/** Ids come from the push mock in staging order, so position is identity here. */
+function idOf(op: string): number {
+  return push.mock.calls.flatMap((call) => call[0]).findIndex((item) => item.op === op) + 1;
+}
+
 async function destination(value: string): Promise<void> {
   const input = document.body.querySelector<HTMLInputElement>('[data-testid="switch-destination"]');
   if (input) {
@@ -350,6 +355,100 @@ describe('RemapDialog', () => {
     find('acknowledge-not-empty')?.dispatchEvent(new MouseEvent('click'));
     await flushPromises();
     expect(find('switch-confirm')?.hasAttribute('disabled')).toBe(false);
+    wrapper.unmount();
+  });
+
+  it('re-aims the import lists that fill the old folder, keeping their depth', async () => {
+    levelNodes.null = [
+      node(FROM, {
+        flags: ['rootFolder'],
+        owners: [
+          owner(1, {
+            importLists: [
+              // One aimed at the root folder itself, one aimed below it.
+              { id: 7, name: 'Trakt watchlist', enabled: true, automatic: true, path: FROM },
+              { id: 8, name: 'Anime', enabled: true, automatic: true, path: `${FROM}/anime` },
+            ],
+          }),
+        ],
+      }),
+    ];
+    const wrapper = await mountDialog();
+    await destination('/data/media/4k');
+
+    expect(find('stranded-lists')?.textContent).toContain('Trakt watchlist');
+
+    find('switch-confirm')?.click();
+    for (let tick = 0; tick < 10; tick += 1) await flushPromises();
+
+    const updates = push.mock.calls
+      .flatMap((call) => call[0])
+      .filter((item) => item.op === 'importList.update');
+
+    expect(updates).toHaveLength(2);
+    expect(updates[0]).toMatchObject({
+      instanceId: 1,
+      payload: { importListId: 7, changes: { rootFolderPath: '/data/media/4k' } },
+    });
+    // The nested one keeps its own subfolder rather than collapsing onto the new root.
+    expect(updates[1]).toMatchObject({
+      payload: { importListId: 8, changes: { rootFolderPath: '/data/media/4k/anime' } },
+    });
+    wrapper.unmount();
+  });
+
+  it('waits for the move before re-aiming a list', async () => {
+    levelNodes.null = [
+      node(FROM, {
+        flags: ['rootFolder'],
+        owners: [
+          owner(1, {
+            importLists: [{ id: 7, name: 'Trakt', enabled: true, automatic: true, path: FROM }],
+          }),
+        ],
+      }),
+    ];
+    const wrapper = await mountDialog();
+    await destination('/data/media/4k');
+
+    find('switch-confirm')?.click();
+    for (let tick = 0; tick < 10; tick += 1) await flushPromises();
+
+    const items = push.mock.calls.flatMap((call) => call[0]);
+    const move = items.find((item) => item.op === 'media.moveRootFolder');
+    const update = items.find((item) => item.op === 'importList.update');
+
+    // A list re-aimed at a folder the media never reached is worse than one left alone, so
+    // the update hangs off the move itself rather than off a position in the batch.
+    expect(move).toBeDefined();
+    expect(update?.dependsOnId).toBe(idOf('media.moveRootFolder'));
+    wrapper.unmount();
+  });
+
+  it('leaves the lists alone when the box is unticked, and says so', async () => {
+    levelNodes.null = [
+      node(FROM, {
+        flags: ['rootFolder'],
+        owners: [
+          owner(1, {
+            importLists: [{ id: 7, name: 'Trakt', enabled: true, automatic: true, path: FROM }],
+          }),
+        ],
+      }),
+    ];
+    const wrapper = await mountDialog();
+    await destination('/data/media/4k');
+
+    find('repoint-lists')?.dispatchEvent(new MouseEvent('click'));
+    await flushPromises();
+    expect(find('stranded-lists')?.textContent).toContain('re-point them on the instance yourself');
+
+    find('switch-confirm')?.click();
+    for (let tick = 0; tick < 10; tick += 1) await flushPromises();
+
+    expect(
+      push.mock.calls.flatMap((call) => call[0]).filter((item) => item.op === 'importList.update'),
+    ).toHaveLength(0);
     wrapper.unmount();
   });
 

@@ -8,10 +8,11 @@ import IconCreate from '@/components/base/icons/IconCreate.vue';
 import IconError from '@/components/base/icons/IconError.vue';
 import IconWarning from '@/components/base/icons/IconWarning.vue';
 import { formatBytes } from '@/lib/format';
+import { rewritePathPrefix } from '@/lib/fs-tree';
 import { rootFolderOwners } from '@/lib/path-matrix';
 import { useMatrixStore } from '@/stores/matrix';
 import { usePathsStore } from '@/stores/paths';
-import { useQueueStore, type RemapTarget } from '@/stores/queue';
+import { useQueueStore, type RemapListTarget, type RemapTarget } from '@/stores/queue';
 import { useUiStore } from '@/stores/ui';
 
 /**
@@ -40,6 +41,7 @@ const ui = useUiStore();
 const toPath = ref('');
 const removeOld = ref(true);
 const refreshAfter = ref(false);
+const repointLists = ref(true);
 const acknowledgeNotEmpty = ref(false);
 const included = ref<number[]>([]);
 const counts = ref<Record<number, number | 'loading' | 'error'>>({});
@@ -147,12 +149,40 @@ const tooLittleSpace = computed(
     destinationFree.value < sourceSize.value,
 );
 
-/** Lists still aimed at the folder being left - they will quietly refill it. */
-const strandedLists = computed<PathImportList[]>(() =>
+/**
+ * Lists still aimed at the folder being left, and where each would point instead.
+ *
+ * Rewritten by prefix rather than replaced: a list filling `movies/4k` under a root folder
+ * being switched should end up at `<new>/4k`, not at the new root itself. That is the same
+ * rule a parent rename follows for nested registrations.
+ */
+const strandedLists = computed(() =>
   candidates.value
     .filter((candidate) => included.value.includes(candidate.instanceId))
-    .flatMap((candidate) => [...candidate.importLists]),
+    .flatMap((candidate) =>
+      candidate.importLists.map((list: PathImportList) => ({
+        instanceId: candidate.instanceId,
+        importListId: list.id,
+        name: list.name,
+        from: list.path,
+        to:
+          destination.value.length === 0
+            ? list.path
+            : rewritePathPrefix(list.path, props.fromPath, destination.value),
+      })),
+    ),
 );
+
+function listTargetsFor(instanceId: number): RemapListTarget[] {
+  if (!repointLists.value) return [];
+  return strandedLists.value
+    .filter((list) => list.instanceId === instanceId)
+    .map((list) => ({
+      importListId: list.importListId,
+      name: list.name,
+      toRootFolderPath: list.to,
+    }));
+}
 
 const chosen = computed(() =>
   candidates.value.filter((candidate) => included.value.includes(candidate.instanceId)),
@@ -198,6 +228,7 @@ const stepCount = computed(
         (candidate.hasDestination ? 0 : 1) +
         (items > 0 ? 1 : 0) +
         (items > 0 && refreshAfter.value ? 1 : 0) +
+        listTargetsFor(candidate.instanceId).length +
         (removeOld.value && candidate.oldRootFolderId !== null ? 1 : 0)
       );
     }, 0),
@@ -254,6 +285,7 @@ async function confirm(): Promise<void> {
       mediaIds,
       needsRootFolder: !candidate.hasDestination,
       removeRootFolderId: removeOld.value ? candidate.oldRootFolderId : null,
+      importLists: listTargetsFor(candidate.instanceId),
     });
   }
 
@@ -458,16 +490,37 @@ watch(crossDevice, (crosses) => {
 
       <div
         v-if="strandedLists.length > 0"
-        class="rounded-md border border-drift/40 bg-drift/5 px-3 py-2 text-[11px] text-drift"
+        class="space-y-2 rounded-md border px-3 py-2.5 text-[11px]"
+        :class="repointLists ? 'border-line bg-raised/40' : 'border-drift/40 bg-drift/5'"
         data-testid="stranded-lists"
       >
-        <p>
-          {{ strandedLists.length }} import list(s) still add to the folder being left:
-          <span class="font-mono">{{ strandedLists.map((list) => list.name).join(', ') }}</span>.
-        </p>
-        <p class="mt-1 text-muted">
-          A list is what refills a folder after it is emptied. Re-point them on the instance, or
-          this switch will be undone one sync at a time.
+        <label class="flex items-start gap-2 text-xs">
+          <BaseCheckbox v-model="repointLists" data-testid="repoint-lists" class="mt-0.5" />
+          <span>
+            <span class="font-medium text-ink">
+              Aim {{ strandedLists.length }} import list(s) at the new folder
+            </span>
+            <span class="block text-[11px] leading-relaxed text-muted">
+              A list is what refills a folder after the media leaves it. Left pointing at
+              <span class="font-mono">{{ props.fromPath }}</span>, it undoes this switch one sync
+              at a time.
+            </span>
+          </span>
+        </label>
+
+        <ul class="space-y-0.5 pl-6 font-mono text-[10px]">
+          <li v-for="list in strandedLists" :key="`${list.instanceId}-${list.importListId}`">
+            <span class="text-ink">{{ list.name }}</span>
+            <span class="text-faint"> {{ list.from }}</span>
+            <template v-if="repointLists && destination.length > 0">
+              <span class="text-faint"> → </span><span class="text-sync">{{ list.to }}</span>
+            </template>
+          </li>
+        </ul>
+
+        <p v-if="!repointLists" class="flex gap-2 text-drift">
+          <IconWarning class="mt-0.5" />
+          Left alone, so re-point them on the instance yourself.
         </p>
       </div>
 
@@ -485,7 +538,7 @@ watch(crossDevice, (crosses) => {
             <template v-if="!candidate.hasDestination">
               add <span class="font-mono">{{ destination }}</span>,
             </template>
-            move its media there with <span class="font-mono text-danger">moveFiles: true</span><template v-if="refreshAfter">, rescan</template><template v-if="removeOld && candidate.oldRootFolderId !== null">, then stop rooting at <span class="font-mono">{{ props.fromPath }}</span></template>
+            move its media there with <span class="font-mono text-danger">moveFiles: true</span><template v-if="refreshAfter">, rescan</template><template v-if="listTargetsFor(candidate.instanceId).length > 0">, re-aim {{ listTargetsFor(candidate.instanceId).length }} import list(s)</template><template v-if="removeOld && candidate.oldRootFolderId !== null">, then stop rooting at <span class="font-mono">{{ props.fromPath }}</span></template>
           </li>
         </ol>
         <p class="mt-2 text-[11px] leading-relaxed text-muted">

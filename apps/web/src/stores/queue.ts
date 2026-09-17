@@ -44,6 +44,13 @@ export interface RootFolderTarget {
   readonly path: string;
 }
 
+/** One import list to aim at the new folder, with the path it should fill instead. */
+export interface RemapListTarget {
+  readonly importListId: number;
+  readonly name: string;
+  readonly toRootFolderPath: string;
+}
+
 export interface RemapTarget {
   readonly instanceId: number;
   readonly mediaIds: readonly number[];
@@ -51,6 +58,13 @@ export interface RemapTarget {
   readonly needsRootFolder: boolean;
   /** Set to also remove the old root folder once the move succeeds. */
   readonly removeRootFolderId: number | null;
+  /**
+   * Lists that fill the folder being left, and where each should point instead.
+   *
+   * Omitted when the switch is not re-pointing them. Left unaimed, a list refills the folder
+   * the media just left, one sync at a time - which is the switch quietly undoing itself.
+   */
+  readonly importLists?: readonly RemapListTarget[];
 }
 
 export interface ImportListTarget {
@@ -613,7 +627,29 @@ export const useQueueStore = defineStore('queue', () => {
         }
       }
 
-      // Step 4: optional cleanup of the old root folder, gated on its move succeeding.
+      // Step 4: aim the import lists at the new folder, gated the same way. A list that
+      // still fills the old folder is what refills it after the media leaves.
+      const relists = targets.flatMap((target) =>
+        (target.importLists ?? []).map((list) => ({ target, list })),
+      );
+      if (relists.length > 0) {
+        await queueApi.push(
+          relists.map(({ target, list }): NewQueueItem => {
+            const dependsOnId = gate(target);
+            return {
+              instanceId: target.instanceId,
+              op: 'importList.update',
+              payload: {
+                importListId: list.importListId,
+                changes: { rootFolderPath: list.toRootFolderPath },
+              },
+              ...(dependsOnId === undefined ? {} : { dependsOnId }),
+            };
+          }),
+        );
+      }
+
+      // Step 5: optional cleanup of the old root folder, gated on its move succeeding.
       const removals = targets.filter((target) => target.removeRootFolderId !== null);
       if (removals.length > 0) {
         await queueApi.push(
