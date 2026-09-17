@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import BaseButton from '@/components/base/BaseButton.vue';
 import BaseCheckbox from '@/components/base/BaseCheckbox.vue';
+import BaseSelect from '@/components/base/BaseSelect.vue';
 import BaseModal from '@/components/base/BaseModal.vue';
 import BaseInstanceBadge from '@/components/base/BaseInstanceBadge.vue';
 import IconCreate from '@/components/base/icons/IconCreate.vue';
 import IconWarning from '@/components/base/icons/IconWarning.vue';
+import type { SelectOption } from '@/components/base/select';
 import { useMediaStore } from '@/stores/media';
+import { usePathsStore } from '@/stores/paths';
 import { useQueueStore, type MediaMoveTarget, type MediaTarget } from '@/stores/queue';
 
 /**
@@ -20,6 +23,7 @@ const props = defineProps<{ targets: readonly MediaTarget[] }>();
 const emit = defineEmits<{ close: [] }>();
 
 const media = useMediaStore();
+const paths = usePathsStore();
 const queue = useQueueStore();
 
 const destinations = ref<Record<number, string>>({});
@@ -38,17 +42,40 @@ const rows = computed(() =>
       items: target.mediaIds.length,
       mediaIds: target.mediaIds,
       roots,
+      options: optionsFor(roots),
       typed,
       needsRootFolder: typed.length > 0 && !roots.includes(typed),
     };
   }),
 );
 
+/**
+ * This instance's root folders, then every other folder on disk.
+ *
+ * The list used to be the root folders alone, which for an instance with one root folder
+ * was a picker offering one option - and the whole point of this dialog is moving a library
+ * somewhere it is not yet. Its own roots still come first and say what they are, because
+ * choosing one of those is the only case that stages no root-folder create.
+ */
+function optionsFor(roots: readonly string[]): SelectOption<string>[] {
+  const own = roots.map((root) => ({ value: root, hint: 'root folder here' }));
+  const rest = paths.knownDirectories
+    .filter((directory) => !roots.includes(directory))
+    .map((directory) => ({ value: directory }));
+  return [...own, ...rest];
+}
+
 const participating = computed(() => rows.value.filter((row) => row.typed.startsWith('/')));
 
 const totalItems = computed(() => participating.value.reduce((sum, row) => sum + row.items, 0));
 
 const valid = computed(() => participating.value.length > 0);
+
+/**
+ * The folder list. This dialog is reached from `/media`, which never loads the folder tree,
+ * so without this the picker had nothing but the instances' own root folders to offer.
+ */
+onMounted(() => void paths.loadDirectories());
 
 /** Deliberately labelled as a copy, not an alignment: the same characters, nothing mapped. */
 function copyLiteral(): void {
@@ -91,17 +118,20 @@ async function confirm(): Promise<void> {
                 {{ row.name }}
               </span>
               <span class="text-[10px] text-faint">{{ row.items }} item(s)</span>
-              <input
+              <BaseSelect
                 v-model="destinations[row.instanceId]"
-                type="text"
-                :list="`roots-${String(row.instanceId)}`"
+                editable
+                mono
+                size="sm"
+                :options="row.options"
+                :loading="paths.directoriesLoading"
+                :note="paths.directoryListNote"
+                class="min-w-0 flex-1"
                 :data-testid="`destination-${String(row.instanceId)}`"
                 placeholder="/data/media/movies"
-                class="min-w-0 flex-1 rounded border border-line bg-raised px-2 py-1 font-mono text-xs text-ink outline-none focus:border-accent"
+                :browse-label="`Folders on disk, ${row.name}'s own root folders first`"
+                empty-hint="No folder on disk matches - type the path and it will be checked before anything runs"
               />
-              <datalist :id="`roots-${String(row.instanceId)}`">
-                <option v-for="root in row.roots" :key="root" :value="root" />
-              </datalist>
               <span
                 v-if="row.needsRootFolder"
                 class="rounded border border-sync/40 bg-sync/10 px-1.5 py-0.5 text-[11px] text-sync"

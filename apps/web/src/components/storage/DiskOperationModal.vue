@@ -13,6 +13,7 @@ import IconCheck from '@/components/base/icons/IconCheck.vue';
 import IconError from '@/components/base/icons/IconError.vue';
 import IconWarning from '@/components/base/icons/IconWarning.vue';
 import BaseCheckbox from '@/components/base/BaseCheckbox.vue';
+import BaseSelect from '@/components/base/BaseSelect.vue';
 
 export type { AlignTarget };
 
@@ -308,6 +309,7 @@ function describeStaging(): string {
 
 onMounted(() => {
   void check();
+  void fs.loadDirectories();
   if (alignable.value) {
     selectedInstances.value = props.alignTargets.map((entry) => entry.instanceId);
     void loadMediaIds();
@@ -370,18 +372,21 @@ watch([name, destination, recursive, force], () => void check());
       </label>
 
       <div v-else-if="props.operation === 'move'" class="space-y-3">
-        <label class="block">
-          <span class="mb-1 block text-xs text-muted">Destination directory</span>
-          <input
+        <div>
+          <p class="mb-1 block text-xs text-muted">Destination directory</p>
+          <BaseSelect
             v-model="destination"
-            type="text"
-            list="storage-roots"
-            class="w-full rounded-md border border-line bg-raised px-3 py-2 font-mono text-sm text-ink outline-none focus:border-accent"
+            editable
+            mono
+            :options="fs.knownDirectories"
+            :loading="fs.directoriesLoading"
+            :note="fs.directoryListNote"
+            class="w-full"
+            data-testid="disk-operation-destination"
+            browse-label="Pick from the folders on disk"
+            empty-hint="No folder on disk matches - type the path and the check below will judge it"
           />
-          <datalist id="storage-roots">
-            <option v-for="root in fs.rootPaths" :key="root" :value="root" />
-          </datalist>
-        </label>
+        </div>
         <label class="block">
           <span class="mb-1 block text-xs text-muted">Folder name at the destination</span>
           <input

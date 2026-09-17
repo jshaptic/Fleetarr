@@ -1,4 +1,5 @@
 import type {
+  FsDirectoriesResponse,
   FsMeasurement,
   PathFilterMode,
   FsOp,
@@ -49,6 +50,20 @@ export const storageApi = {
   /** The joined view: disk truth and *Arr truth, one directory level at a time. */
   matrix: (params: MatrixParams = {}) =>
     api.get<PathMatrixResponse>(`/storage/matrix${matrixQuery(params)}`),
+
+  /**
+   * Every directory that could be a destination, flat. One request, not a crawl: the
+   * pickers filter it in the browser, so nothing is asked for per keystroke.
+   */
+  directories: (params: { under?: string; refresh?: boolean } = {}) => {
+    const query = new URLSearchParams();
+    if (params.under !== undefined) query.set('under', params.under);
+    if (params.refresh === true) query.set('refresh', 'true');
+    const serialised = query.toString();
+    return api.get<FsDirectoriesResponse>(
+      `/storage/directories${serialised.length === 0 ? '' : `?${serialised}`}`,
+    );
+  },
 
   measure: (path: string) =>
     api.get<FsMeasurement>(`/storage/measure?path=${encodeURIComponent(path)}`),

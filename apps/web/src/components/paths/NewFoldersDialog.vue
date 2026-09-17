@@ -8,11 +8,11 @@ import { usePathsStore } from '@/stores/paths';
 import { useQueueStore } from '@/stores/queue';
 import IconCheck from '@/components/base/icons/IconCheck.vue';
 import IconCreate from '@/components/base/icons/IconCreate.vue';
-import IconDropdown from '@/components/base/icons/IconDropdown.vue';
 import IconError from '@/components/base/icons/IconError.vue';
 import IconSkip from '@/components/base/icons/IconSkip.vue';
 import IconWarning from '@/components/base/icons/IconWarning.vue';
 import BaseCheckbox from '@/components/base/BaseCheckbox.vue';
+import BaseSelect from '@/components/base/BaseSelect.vue';
 
 /**
  * One box for every folder about to exist.
@@ -52,74 +52,6 @@ const skipExisting = ref(true);
 const showHelp = ref(false);
 
 const plan = computed(() => planNewFolders(parent.value, draft.value));
-
-// ------------------------------------------------------------ the parent picker
-
-/**
- * "Create in" is a combobox, not a `<datalist>`.
- *
- * A datalist filters its options by what is already in the field, and this field opens
- * pre-filled with the folder you had selected - so the list it offered was reliably empty,
- * which is no list at all. This one opens on the caret, lists every directory the tree has
- * actually read (see `knownDirectories`), narrows as you type, and never stands in the way
- * of typing a path it has never heard of: the preflight is what says whether a path is real.
- */
-const open = ref(false);
-/** What has been typed since the list was opened, or null while it is showing everything. */
-const query = ref<string | null>(null);
-const highlight = ref(0);
-
-const suggestions = computed(() => {
-  const needle = query.value?.trim().toLowerCase() ?? '';
-  const all = fs.knownDirectories;
-  return needle.length === 0 ? all : all.filter((path) => path.toLowerCase().includes(needle));
-});
-
-function openPicker(): void {
-  open.value = !open.value;
-  query.value = null;
-  highlight.value = 0;
-}
-
-function onParentInput(event: Event): void {
-  const value = (event.target as HTMLInputElement).value;
-  parent.value = value;
-  query.value = value;
-  open.value = true;
-  highlight.value = 0;
-}
-
-function pick(path: string): void {
-  parent.value = path;
-  open.value = false;
-  query.value = null;
-}
-
-/** Arrow keys walk the list, Enter takes the highlighted row, Escape closes only the list. */
-function onParentKeydown(event: KeyboardEvent): void {
-  if (event.key === 'Escape' && open.value) {
-    event.stopPropagation();
-    open.value = false;
-    return;
-  }
-  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-    event.preventDefault();
-    if (!open.value) {
-      open.value = true;
-      query.value = null;
-      return;
-    }
-    const step = event.key === 'ArrowDown' ? 1 : -1;
-    const count = suggestions.value.length;
-    if (count > 0) highlight.value = (highlight.value + step + count) % count;
-    return;
-  }
-  if (event.key === 'Enter' && open.value) {
-    event.preventDefault();
-    const chosen = suggestions.value[highlight.value];
-    if (chosen !== undefined) pick(chosen);
-  }
-}
 
 // ------------------------------------------------------------------- preflight
 
@@ -187,7 +119,10 @@ function schedule(): void {
   timer = setTimeout(() => void check(), SETTLE_MS);
 }
 
-onMounted(() => void check());
+onMounted(() => {
+  void check();
+  void fs.loadDirectories();
+});
 onUnmounted(() => {
   if (timer !== null) clearTimeout(timer);
 });
@@ -276,62 +211,21 @@ async function stage(): Promise<void> {
     @close="emit('close')"
   >
     <div class="space-y-4">
-      <div class="relative">
+      <div>
         <label class="mb-1 block text-xs text-muted" for="new-folders-parent">Create in</label>
-        <input
+        <BaseSelect
           id="new-folders-parent"
-          :value="parent"
-          type="text"
-          role="combobox"
-          spellcheck="false"
-          autocomplete="off"
-          aria-controls="new-folders-parent-list"
-          :aria-expanded="open"
+          v-model="parent"
+          editable
+          mono
+          :options="fs.knownDirectories"
+          :loading="fs.directoriesLoading"
+          :note="fs.directoryListNote"
+          class="w-full"
           data-testid="new-folders-parent"
-          class="w-full rounded-md border border-line bg-raised px-3 py-2 pr-9 font-mono text-sm text-ink outline-none focus:border-accent"
-          @input="onParentInput"
-          @keydown="onParentKeydown"
-          @blur="open = false"
+          browse-label="Pick from the folders on disk"
+          empty-hint="No folder on disk matches - type the path and the preflight will check it"
         />
-        <button
-          type="button"
-          class="absolute right-1 bottom-0 flex h-[38px] w-7 items-center justify-center text-xs transition-colors"
-          :class="open ? 'text-accent' : 'text-faint hover:text-ink'"
-          :aria-expanded="open"
-          :title="`Pick from the ${fs.knownDirectories.length} folder(s) this view has read`"
-          data-testid="new-folders-parent-toggle"
-          aria-label="Browse the folders this view has read"
-          @mousedown.prevent="openPicker"
-        >
-          <IconDropdown size="sm" />
-        </button>
-
-        <ul
-          v-if="open"
-          id="new-folders-parent-list"
-          role="listbox"
-          class="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-line bg-overlay py-1 shadow-xl"
-          data-testid="new-folders-parent-list"
-        >
-          <li
-            v-for="(path, index) in suggestions"
-            :key="path"
-            role="option"
-            :aria-selected="path === parent"
-            class="cursor-pointer px-3 py-1 font-mono text-[11px]"
-            :class="[
-              index === highlight ? 'bg-raised text-ink' : 'text-muted',
-              path === parent ? 'text-accent' : '',
-            ]"
-            @mouseenter="highlight = index"
-            @mousedown.prevent="pick(path)"
-          >
-            {{ path }}
-          </li>
-          <li v-if="suggestions.length === 0" class="px-3 py-1 text-[11px] text-faint">
-            No folder read so far matches - type the path and the preflight will check it
-          </li>
-        </ul>
       </div>
 
       <div>

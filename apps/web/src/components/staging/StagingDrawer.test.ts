@@ -177,7 +177,15 @@ describe('StagingDrawer', () => {
     await useQueueStore().load();
     await flushPromises();
 
-    await wrapper.find('select').setValue('continue');
+    // The policy picker is `BaseSelect`, whose list is teleported to the body - there is no
+    // native <select> to `setValue` any more, so this drives the popup the way a user does.
+    await wrapper.find('[data-select-toggle]').trigger('mousedown');
+    const keep = [...document.body.querySelectorAll('[role="option"]')].find((row) =>
+      row.textContent?.includes('keep going'),
+    );
+    keep?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    await flushPromises();
+
     const apply = wrapper.findAll('button').find((b) => b.text() === 'Apply All');
     await apply?.trigger('click');
     await flushPromises();

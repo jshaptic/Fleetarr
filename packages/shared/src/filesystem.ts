@@ -47,6 +47,26 @@ export interface FsListResponse {
   readonly entries: readonly FsEntry[];
 }
 
+/**
+ * Every directory a picker may offer, as one flat list.
+ *
+ * Deliberately not a tree and deliberately not `PathNode`: a destination field needs names,
+ * not facts, so this walk does no `stat` per entry and carries no *Arr join. The tree view
+ * summarises a level with more than 64 children down to its problems, which is right for
+ * reading a fleet and useless for choosing a folder - this answers the second question.
+ *
+ * It stops at a root folder, exactly as the matrix does: below one lies the library, which
+ * is thousands of media folders and never a destination.
+ */
+export interface FsDirectoriesResponse {
+  /** The subtree walked. Null means every storage root. */
+  readonly under: string | null;
+  readonly directories: readonly string[];
+  /** True when the walk hit its cap - the list is a lower bound, and the UI says so. */
+  readonly truncated: boolean;
+  readonly scannedAt: string;
+}
+
 export interface FsMeasurement {
   readonly path: string;
   readonly sizeOnDisk: number;

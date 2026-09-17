@@ -984,14 +984,14 @@ describe('PathMatrixView', () => {
 
     // Closed until asked for: the field is pre-filled, and a list under a filled field was
     // exactly what the old datalist got wrong.
-    expect(document.body.querySelector('[data-testid="new-folders-parent-list"]')).toBeNull();
+    expect(document.body.querySelector('[data-select-list]')).toBeNull();
 
     document.body
-      .querySelector('[data-testid="new-folders-parent-toggle"]')
+      .querySelector('[data-select-toggle]')
       ?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     for (let tick = 0; tick < 2; tick += 1) await flushPromises();
 
-    const list = () => document.body.querySelector('[data-testid="new-folders-parent-list"]');
+    const list = () => document.body.querySelector('[data-select-list]');
     expect(list()?.textContent).toContain('/data/media/movies');
     expect(list()?.textContent).toContain('/data/media/old-movies');
 

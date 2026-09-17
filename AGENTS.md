@@ -10,20 +10,19 @@ Keep this file under 200 lines. Tighten existing rules rather than adding sectio
   "missing": batch actions skip it, deletes need `force`, and the count is stated.
 - **NEVER translate paths.** Fleetarr and the *Arr apps must see identical container
   paths; comparison is literal. A mismatch is reported, never bridged.
-- **ALWAYS `PUT` a merged resource** - fetch raw, merge changed keys, PUT (`mergeForPut`).
-  A partial body silently wipes omitted fields.
+- **ALWAYS `PUT` a merged resource** (`mergeForPut`) - a partial body wipes what it omits.
 - **ALWAYS reuse `components/base`.** Invent a new component only when nothing there fits.
-- **NEVER draw an instance's initials or its app colour by hand.** `BaseInstanceBadge`
-  is the only one; `BaseInstanceBadge.test.ts` fails the build if `initialsOf` or the
-  radarr/sonarr palette is named anywhere else.
-- **NEVER import an icon library outside `components/base/icons/glyphs.ts`.** That module
-  is the app's only contact with `@remixicon/vue`; every other file asks for a meaning
-  (`IconWarning`) and optionally a weight (`variant="solid"`), never a drawing.
-  `icons.test.ts` fails the build if anything else names it.
-- **NEVER add a `<style>` block.** Components are utility-classes-only; `icons.test.ts`
-  pins that at zero.
+- **NEVER draw an instance's initials or its app colour by hand.** `BaseInstanceBadge` is
+  the only one; its test fails the build if `initialsOf` or the palette is named elsewhere.
+- **NEVER import an icon library outside `components/base/icons/glyphs.ts`.** Every other
+  file asks for a meaning (`IconWarning`) and a weight (`variant="solid"`), never a
+  drawing; `icons.test.ts` fails the build if anything else names `@remixicon/vue`.
+- **NEVER add a `<style>` block.** Utility classes only; `icons.test.ts` pins that at zero.
 - **NEVER hand-roll a checkbox.** `BaseCheckbox` is the only one, and it keeps a real
   `<input type="checkbox">` under a drawn box.
+- **NEVER hand-roll a picker, a `<datalist>` or a `<select>`.** `BaseSelect` is the only
+  one: `editable` means what you type is the value (a path), the default means only an
+  option is. `BaseSelect.test.ts` fails the build on any of the three.
 - **ALWAYS run `npm run typecheck` and `npm test`** before calling work done.
 
 ## Project context

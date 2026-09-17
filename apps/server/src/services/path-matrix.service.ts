@@ -3,6 +3,7 @@ import path from 'node:path';
 import { PATH_SEVERITIES, PATH_USES, parsePathFilter, passesPathFilter } from '@fleetarr/shared';
 import type {
   ArrRootFolder,
+  FsDirectoriesResponse,
   PathFilter,
   PathFilterMode,
   FsRoot,
@@ -100,6 +101,13 @@ export const DEFAULT_LIMIT = 200;
  */
 export const FULL_LEVEL_ENTRIES = 64;
 
+/**
+ * How long a walked directory list stays good for. Short, because the pickers fed by it
+ * also stage `fs.mkdir`: a folder created through Fleetarr should appear in the next
+ * dialog rather than after a page reload, and re-walking a tree of names is cheap.
+ */
+const DIRECTORY_CACHE_MS = 60_000;
+
 /** What a level knows about one child before anything is stat'd. */
 interface Candidate {
   readonly path: string;
@@ -128,6 +136,9 @@ interface Candidate {
  * handful of rows actually returned are ever probed.
  */
 export class PathMatrixService {
+  /** Walked trees, keyed by subtree. Short-lived: a folder made elsewhere should show up. */
+  private readonly directoryWalks = new Map<string, { at: number; value: FsDirectoriesResponse }>();
+
   constructor(private readonly deps: PathMatrixServiceDeps) {}
 
   async matrix(query: PathMatrixQuery = {}): Promise<PathMatrixResponse> {
@@ -178,6 +189,59 @@ export class PathMatrixService {
       totals: this.totals(indexes, [...(topLevel === null ? [] : [topLevel]), ...levels]),
       mismatches: this.mismatches(indexes),
     };
+  }
+
+  /**
+   * Every directory a picker may offer, walked once and cached.
+   *
+   * Separate from `matrix` on purpose. The matrix answers "what is going on in this
+   * folder", which is why it summarises a big level down to its problems and stops at 200
+   * rows - both right for reading a fleet, and both the reason a destination field built
+   * on it showed a handful of folders out of hundreds. This answers "where could this go",
+   * so it walks the whole tree and returns nothing but names.
+   *
+   * The one policy it shares: a root folder is a leaf. Below one lies the library, and
+   * offering ten thousand media folders as destinations would bury the folders that are.
+   */
+  async directories(query: { under?: string; limit?: number; refresh?: boolean } = {}): Promise<FsDirectoriesResponse> {
+    const rootsResponse = this.deps.filesystem.roots();
+    const scannedAt = new Date().toISOString();
+    const under = query.under === undefined ? null : normalisePath(query.under);
+
+    if (!rootsResponse.enabled) return { under, directories: [], truncated: false, scannedAt };
+
+    const cacheKey = `${under ?? ''} ${String(query.limit ?? 0)}`;
+    const cached = this.directoryWalks.get(cacheKey);
+    if (query.refresh !== true && cached !== undefined && Date.now() - cached.at < DIRECTORY_CACHE_MS) {
+      return cached.value;
+    }
+
+    const indexes = await this.deps.index.index({ refresh: query.refresh === true });
+    const stopAt = (directory: string): boolean => isRootFolderPath(directory, indexes);
+    const targets =
+      under === null ? rootsResponse.roots.filter((root) => root.exists).map((root) => root.path) : [under];
+
+    const found = new Set<string>();
+    let truncated = false;
+    for (const target of targets) {
+      // A mount is itself a destination, and a root folder at one is a leaf we still list.
+      found.add(target);
+      const walk = await this.deps.filesystem.walkDirectories(target, {
+        stopAt,
+        ...(query.limit === undefined ? {} : { maxEntries: query.limit }),
+      });
+      for (const directory of walk.directories) found.add(directory);
+      if (walk.truncated) truncated = true;
+    }
+
+    const value: FsDirectoriesResponse = {
+      under,
+      directories: [...found].sort((left, right) => left.localeCompare(right)),
+      truncated,
+      scannedAt,
+    };
+    this.directoryWalks.set(cacheKey, { at: Date.now(), value });
+    return value;
   }
 
   // ------------------------------------------------------------------ one level

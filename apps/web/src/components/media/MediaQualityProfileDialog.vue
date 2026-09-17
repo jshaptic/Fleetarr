@@ -2,7 +2,8 @@
 import { computed, ref } from 'vue';
 import BaseButton from '@/components/base/BaseButton.vue';
 import BaseModal from '@/components/base/BaseModal.vue';
-import BaseSelect, { type SelectOption } from '@/components/base/BaseSelect.vue';
+import BaseSelect from '@/components/base/BaseSelect.vue';
+import type { SelectOption } from '@/components/base/select';
 import BaseInstanceBadge from '@/components/base/BaseInstanceBadge.vue';
 import IconWarning from '@/components/base/icons/IconWarning.vue';
 import { useMediaStore } from '@/stores/media';

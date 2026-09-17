@@ -59,6 +59,11 @@ export const usePathsStore = defineStore('paths', () => {
   const levels = ref<Record<string, PathMatrixLevel>>({});
   /** The flat list's own cache - see `loadFlatView`. Never shares state with `levels`. */
   const flatLevels = ref<Record<string, PathMatrixLevel>>({});
+  /** Every directory the server could walk to, for the pickers - see `loadDirectories`. */
+  const walkedDirectories = ref<readonly string[]>([]);
+  const directoriesTruncated = ref(false);
+  const directoriesLoadedAt = ref<number | null>(null);
+  const directoriesLoading = ref(false);
   const totals = ref<PathMatrixTotals>(emptyTotals());
   const mismatches = ref<readonly MappingMismatch[]>([]);
   const scannedAt = ref<string | null>(null);
@@ -111,15 +116,17 @@ export const usePathsStore = defineStore('paths', () => {
   const rootPaths = computed(() => usableRoots.value.map((root) => root.path));
 
   /**
-   * Every directory this browser has actually read, for the "Create in" picker.
+   * Every directory a picker may offer: the walk, the mounts, and anything a level added.
    *
-   * Deliberately not "every folder on disk": levels are fetched lazily, so this is exactly
-   * what the view can honestly offer - the mounts, plus whatever has been expanded. Typing
-   * a path that is not in here stays allowed; the preflight is the authority on whether it
-   * exists, not this list.
+   * The walk is the substance and the levels are a bonus - a level is fetched for the tree
+   * view, which summarises a directory of 812 films down to its problems, so on its own it
+   * offered a handful of folders out of hundreds and called it the filesystem. What the
+   * walk cannot reach is stated rather than hidden: it stops at a root folder, and says so
+   * when it hits its cap. Typing a path that is in neither stays allowed; the preflight is
+   * the authority on whether a path exists, not this list.
    */
   const knownDirectories = computed<string[]>(() => {
-    const known = new Set<string>(rootPaths.value);
+    const known = new Set<string>([...rootPaths.value, ...walkedDirectories.value]);
     for (const level of [...Object.values(levels.value), ...Object.values(flatLevels.value)]) {
       for (const node of level.nodes) {
         if (node.exists && node.inScope && node.kind === 'directory') known.add(node.path);
@@ -127,6 +134,20 @@ export const usePathsStore = defineStore('paths', () => {
     }
     return [...known].sort((a, b) => a.localeCompare(b));
   });
+
+  /**
+   * What the folder list does not hold, in one sentence, for every picker that shows it.
+   *
+   * Here rather than in each dialog because it is a fact about the walk, not about the
+   * field: if the policy changes, three pickers stop lying at once. Both limits are the
+   * kind this app states rather than hides - a capped list that looked complete would send
+   * someone hunting for a folder that is there.
+   */
+  const directoryListNote = computed(() =>
+    directoriesTruncated.value
+      ? 'Too many folders to list them all - a path this list does not show can still be typed, and will still be checked.'
+      : 'Folders inside a root folder are not listed - that is the library, never a destination.',
+  );
 
   const unwritableRoots = computed(() =>
     roots.value.filter((root) => root.exists && !root.writable),
@@ -438,6 +459,37 @@ export const usePathsStore = defineStore('paths', () => {
     focus.value = null;
   }
 
+  /**
+   * The folder list every picker offers, walked once per session.
+   *
+   * One request rather than a crawl, and nothing per keystroke: the server returns names
+   * only, so a whole tree costs about what one expanded level used to, and the filtering
+   * happens in the browser where it is instant. Safe to call from a dialog that has never
+   * touched `/paths` - which is how the `/media` dialogs ended up offering an empty list.
+   *
+   * A failure is deliberately quiet. The picker still works, because a typed path is
+   * always allowed and the preflight is what judges it; a toast for something the user did
+   * not ask for would be noise over a field that is behaving.
+   */
+  async function loadDirectories(options: { refresh?: boolean } = {}): Promise<void> {
+    const fresh = directoriesLoadedAt.value !== null && Date.now() - directoriesLoadedAt.value < 60_000;
+    if (directoriesLoading.value || (fresh && options.refresh !== true)) return;
+
+    directoriesLoading.value = true;
+    try {
+      const response = await storageApi.directories(
+        options.refresh === true ? { refresh: true } : {},
+      );
+      walkedDirectories.value = response.directories;
+      directoriesTruncated.value = response.truncated;
+      directoriesLoadedAt.value = Date.now();
+    } catch {
+      // Left to the levels and the mounts, which is what the pickers had before.
+    } finally {
+      directoriesLoading.value = false;
+    }
+  }
+
   /** Recursive size, on demand only - this is the expensive call. */
   async function measure(target: string): Promise<void> {
     measuring.value = { ...measuring.value, [target]: true };
@@ -507,6 +559,9 @@ export const usePathsStore = defineStore('paths', () => {
     usableRoots,
     rootPaths,
     knownDirectories,
+    directoriesTruncated,
+    directoriesLoading,
+    directoryListNote,
     unwritableRoots,
     brokenRoots,
     unseenNodes,
@@ -516,6 +571,7 @@ export const usePathsStore = defineStore('paths', () => {
     nodeAt,
     rootFolderTargetsFor,
     load,
+    loadDirectories,
     fetchLevels,
     expand,
     collapse,

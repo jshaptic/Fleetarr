@@ -1,4 +1,10 @@
-import type { PathMatrixLevel, PathMatrixResponse, PathNode, PathRollup } from '@fleetarr/shared';
+import type {
+  FsDirectoriesResponse,
+  PathMatrixLevel,
+  PathMatrixResponse,
+  PathNode,
+  PathRollup,
+} from '@fleetarr/shared';
 import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiRequestError } from '@/api/client';
@@ -86,6 +92,9 @@ function response(levels: PathMatrixLevel[], overrides: Partial<PathMatrixRespon
 }
 
 const calls: MatrixParams[] = [];
+const directoryCalls: { under?: string; refresh?: boolean }[] = [];
+let directoryHandler: () => Promise<FsDirectoriesResponse> = () =>
+  Promise.resolve({ under: null, directories: [], truncated: false, scannedAt: '' });
 let handler: (params: MatrixParams) => Promise<PathMatrixResponse> = () =>
   Promise.resolve(response([]));
 
@@ -94,6 +103,10 @@ vi.mock('@/api/storage', () => ({
     matrix: (params: MatrixParams = {}) => {
       calls.push(params);
       return handler(params);
+    },
+    directories: (params: { under?: string; refresh?: boolean } = {}) => {
+      directoryCalls.push(params);
+      return directoryHandler();
     },
     measure: vi.fn(),
     preflight: vi.fn(),
@@ -106,7 +119,81 @@ const { usePathsStore } = await import('./paths');
 beforeEach(() => {
   setActivePinia(createPinia());
   calls.length = 0;
+  directoryCalls.length = 0;
   handler = () => Promise.resolve(response([]));
+  directoryHandler = () =>
+    Promise.resolve({ under: null, directories: [], truncated: false, scannedAt: '' });
+});
+
+/**
+ * The picker's folder list. It used to be assembled from whatever levels the tree view had
+ * fetched, which meant a dialog opened from `/media` offered nothing and a dialog opened on
+ * a big directory offered the handful of rows the server had summarised it down to.
+ */
+describe('the directory list the pickers offer', () => {
+  it('walks once and serves every picker after that from the same answer', async () => {
+    directoryHandler = () =>
+      Promise.resolve({
+        under: null,
+        directories: ['/data/media', '/data/media/movies'],
+        truncated: false,
+        scannedAt: '2026-09-01T00:00:00.000Z',
+      });
+
+    const store = usePathsStore();
+    await store.loadDirectories();
+    await store.loadDirectories();
+
+    expect(directoryCalls).toHaveLength(1);
+    expect(store.knownDirectories).toEqual(['/data/media', '/data/media/movies']);
+  });
+
+  it('walks again when asked to refresh', async () => {
+    const store = usePathsStore();
+    await store.loadDirectories();
+    await store.loadDirectories({ refresh: true });
+
+    expect(directoryCalls).toEqual([{}, { refresh: true }]);
+  });
+
+  /** A capped walk is a lower bound, and the picker says so rather than looking complete. */
+  it('carries the truncation through so the picker can state it', async () => {
+    directoryHandler = () =>
+      Promise.resolve({ under: null, directories: ['/data'], truncated: true, scannedAt: '' });
+
+    const store = usePathsStore();
+    await store.loadDirectories();
+
+    expect(store.directoriesTruncated).toBe(true);
+  });
+
+  it('adds to what the levels know rather than replacing it', async () => {
+    directoryHandler = () =>
+      Promise.resolve({ under: null, directories: ['/mnt/archive'], truncated: false, scannedAt: '' });
+    handler = () => Promise.resolve(response([level(null, [node('/data')])]));
+
+    const store = usePathsStore();
+    await store.load();
+    await store.loadDirectories();
+
+    expect(store.knownDirectories).toEqual(['/data', '/mnt/archive']);
+  });
+
+  /**
+   * Quiet on purpose: a typed path is always allowed and the preflight judges it, so a
+   * toast about a list nobody asked for would be noise over a field that still works.
+   */
+  it('leaves the picker with the levels when the walk fails, and says nothing', async () => {
+    directoryHandler = () => Promise.reject(new Error('nope'));
+    handler = () => Promise.resolve(response([level(null, [node('/data')])]));
+
+    const store = usePathsStore();
+    await store.load();
+    await store.loadDirectories();
+
+    expect(store.knownDirectories).toEqual(['/data']);
+    expect(store.directoriesLoading).toBe(false);
+  });
 });
 
 describe('usePathsStore', () => {

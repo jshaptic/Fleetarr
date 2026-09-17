@@ -2,7 +2,8 @@
 import { computed, ref } from 'vue';
 import BaseButton from '@/components/base/BaseButton.vue';
 import BaseInstanceBadge from '@/components/base/BaseInstanceBadge.vue';
-import BaseSelect, { type SelectOption } from '@/components/base/BaseSelect.vue';
+import BaseSelect from '@/components/base/BaseSelect.vue';
+import type { SelectOption } from '@/components/base/select';
 import ImpactSummary from '@/components/staging/ImpactSummary.vue';
 import StagedOperationRow from '@/components/staging/StagedOperationRow.vue';
 import { useQueueStore } from '@/stores/queue';

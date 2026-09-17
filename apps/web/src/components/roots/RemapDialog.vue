@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import type { FsPreflight, PathImportList } from '@fleetarr/shared';
 import BaseButton from '@/components/base/BaseButton.vue';
 import BaseCheckbox from '@/components/base/BaseCheckbox.vue';
+import BaseSelect from '@/components/base/BaseSelect.vue';
 import BaseModal from '@/components/base/BaseModal.vue';
 import IconCreate from '@/components/base/icons/IconCreate.vue';
 import IconError from '@/components/base/icons/IconError.vue';
@@ -307,6 +308,9 @@ async function confirm(): Promise<void> {
 }
 
 onMounted(async () => {
+  // The destination list. Fired and not awaited: the dialog is usable while it lands, and
+  // a typed path is judged by the preflight regardless of whether the list holds it.
+  void paths.loadDirectories();
   included.value = candidates.value.map((candidate) => candidate.instanceId);
   void loadCounts();
 
@@ -345,20 +349,23 @@ watch(crossDevice, (crosses) => {
     @close="emit('close')"
   >
     <div class="space-y-4">
-      <label class="block">
-        <span class="mb-1 block text-xs text-muted">Destination folder</span>
-        <input
+      <div>
+        <label class="mb-1 block text-xs text-muted" for="switch-destination">Destination folder</label>
+        <BaseSelect
+          id="switch-destination"
           v-model="toPath"
-          type="text"
-          list="known-paths"
+          editable
+          mono
+          :options="paths.knownDirectories"
+          :loading="paths.directoriesLoading"
+          :note="paths.directoryListNote"
+          class="w-full"
           data-testid="switch-destination"
           placeholder="/data/media/movies-4k"
-          class="w-full rounded-md border border-line bg-raised px-3 py-2 font-mono text-sm text-ink outline-none focus:border-accent"
+          browse-label="Pick from the folders on disk"
+          empty-hint="No folder on disk matches - type the path and the check below will judge it"
         />
-        <datalist id="known-paths">
-          <option v-for="path in paths.knownDirectories" :key="path" :value="path" />
-        </datalist>
-      </label>
+      </div>
 
       <!-- what the disk says about that path -->
       <div
@@ -460,9 +467,11 @@ watch(crossDevice, (crosses) => {
       <div class="space-y-2 rounded-md border border-line bg-raised/40 px-3 py-2.5">
         <p class="flex gap-2 text-[11px] leading-relaxed text-danger">
           <IconWarning class="mt-0.5" />
-          *Arr will physically relocate {{ totalMedia }} item(s). This is slow and Fleetarr cannot
-          undo it. If the files are <em>already</em> at the destination, close this and use
-          rename &amp; align instead - that re-points without moving a byte.
+          <span>
+            *Arr will physically relocate {{ totalMedia }} item(s). This is slow and Fleetarr
+            cannot undo it. If the files are <em>already</em> at the destination, close this and
+            use rename &amp; align instead - that re-points without moving a byte.
+          </span>
         </p>
 
         <label class="flex items-start gap-2 text-xs">

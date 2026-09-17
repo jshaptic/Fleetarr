@@ -46,7 +46,30 @@ export interface MeasureOptions {
   readonly maxEntries?: number;
 }
 
+export interface WalkDirectoriesOptions {
+  readonly signal?: AbortSignal;
+  readonly maxEntries?: number;
+  /**
+   * A directory to list but not descend into. Injected rather than known here: what counts
+   * as a leaf is an *Arr question (a root folder), and this layer only reads the disk.
+   */
+  readonly stopAt?: (directory: string) => boolean;
+}
+
+export interface DirectoryWalk {
+  readonly directories: readonly string[];
+  readonly truncated: boolean;
+}
+
 const DEFAULT_MAX_ENTRIES = 50_000;
+/**
+ * The directory-walk cap. Two orders below `DEFAULT_MAX_ENTRIES` because this list is sent
+ * to a browser and filtered in it: past a few thousand folders the picker, not the walk, is
+ * what gives out. Hitting it is reported, never silently trimmed.
+ */
+const DEFAULT_MAX_DIRECTORIES = 20_000;
+/** Reads issued at once while walking. Enough to hide latency, few enough to hold handles. */
+const READ_CONCURRENCY = 32;
 const LOW_SPACE_BYTES = 1024 * 1024 * 1024; // 1 GiB
 
 function ok(id: string, message: string): FsCheck {
@@ -253,6 +276,78 @@ export class FilesystemService {
     const value: FsMeasurement = { path: target, sizeOnDisk, fileCount, directoryCount, truncated };
     this.measurements.set(target, { at: Date.now(), value });
     return value;
+  }
+
+  /**
+   * Every directory under a target, as a flat sorted list.
+   *
+   * The cheap half of {@link measure}: names only, no `stat`, no size, no per-entry access
+   * check - a picker needs to know that a folder exists, and the preflight is what judges
+   * the one that gets chosen. That is what makes walking a whole tree affordable here when
+   * measuring one is "the one operation that can take minutes".
+   *
+   * A symlink is never followed. `measure` skips one to avoid counting a subtree twice;
+   * here the reason is the storage contract - a link can point outside the roots, and this
+   * list is fed straight back as a destination.
+   */
+  async walkDirectories(input: string, options: WalkDirectoriesOptions = {}): Promise<DirectoryWalk> {
+    const target = await this.guard.resolve(input);
+    const maxEntries = options.maxEntries ?? DEFAULT_MAX_DIRECTORIES;
+    const stopAt = options.stopAt ?? (() => false);
+
+    const directories: string[] = [];
+    let truncated = false;
+
+    /**
+     * Breadth-first, a level at a time, with the reads of one level issued together.
+     *
+     * The shape of the tree is what makes this worth doing: a media library is wide and
+     * shallow, and every `readdir` is latency rather than work - on a network share or a
+     * spun-down array, ~8ms each. Sequentially that is seconds of a dialog saying "reading
+     * folders"; a level at a time it is one round trip per depth. Bounded, because a wide
+     * level would otherwise open thousands of handles at once.
+     */
+    let frontier: string[] = [target];
+    while (frontier.length > 0 && !truncated) {
+      const next: string[] = [];
+
+      for (let at = 0; at < frontier.length; at += READ_CONCURRENCY) {
+        options.signal?.throwIfAborted();
+        const batch = frontier.slice(at, at + READ_CONCURRENCY);
+        const listings = await Promise.all(
+          batch.map(async (dir) => {
+            if (stopAt(dir)) return [];
+            try {
+              return await readdir(dir, { withFileTypes: true });
+            } catch {
+              return []; // unreadable subtree: absent from the list rather than fatal
+            }
+          }),
+        );
+
+        // Collected in the order they were requested, so the same tree always yields the
+        // same list - and the same one is cut, when the cap cuts it.
+        for (const [index, dirents] of listings.entries()) {
+          for (const dirent of dirents) {
+            if (!dirent.isDirectory()) continue; // a symlink is not a directory to this check
+            if (directories.length >= maxEntries) {
+              truncated = true;
+              break;
+            }
+
+            const child = path.join(batch[index] as string, dirent.name);
+            directories.push(child);
+            next.push(child);
+          }
+          if (truncated) break;
+        }
+        if (truncated) break;
+      }
+
+      frontier = next;
+    }
+
+    return { directories: directories.sort((a, b) => a.localeCompare(b)), truncated };
   }
 
   /**

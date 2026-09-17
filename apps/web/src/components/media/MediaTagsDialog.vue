@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import BaseButton from '@/components/base/BaseButton.vue';
+import BaseSelect from '@/components/base/BaseSelect.vue';
 import BaseModal from '@/components/base/BaseModal.vue';
 import BaseInstanceBadge from '@/components/base/BaseInstanceBadge.vue';
 import IconClose from '@/components/base/icons/IconClose.vue';
@@ -154,21 +155,22 @@ async function confirm(): Promise<void> {
         </button>
       </div>
 
-      <label class="block">
-        <span class="mb-1 block text-xs text-muted">Tags</span>
-        <input
+      <div>
+        <label class="mb-1 block text-xs text-muted" for="tag-label-input">Tags</label>
+        <BaseSelect
+          editable
+          id="tag-label-input"
           v-model="entry"
-          type="text"
-          list="media-tag-labels"
+          :options="known"
+          class="w-full"
           data-testid="tag-label-input"
-          placeholder="type a label and press Enter"
-          class="w-full rounded-md border border-line bg-raised px-3 py-2 text-sm text-ink outline-none focus:border-accent"
-          @keydown.enter.prevent="addLabel"
+          placeholder="type a label and press Enter, or pick one that exists"
+          browse-label="Labels that exist on the instances in range"
+          empty-hint="No instance in range has that label - adding it creates it there"
+          @enter="addLabel"
+          @pick="addLabel"
         />
-        <datalist id="media-tag-labels">
-          <option v-for="label in known" :key="label" :value="label" />
-        </datalist>
-      </label>
+      </div>
 
       <div v-if="labels.length > 0" class="flex flex-wrap gap-1">
         <span

@@ -62,6 +62,43 @@ describe('FilesystemService', () => {
     assert.equal(viaLink.fileCount, 1);
   });
 
+  test('walks directories for names alone, never through a symlink', async () => {
+    const walk = await fs.walkDirectories(root);
+
+    assert.deepEqual(walk.directories, [
+      path.join(root, 'movies'),
+      path.join(root, 'movies-4k'),
+      path.join(root, 'movies', 'Arrival (2016)'),
+      path.join(root, 'movies', 'Empty Folder'),
+    ]);
+    // `movies-link` points at `movies`; following it would list the same tree twice and,
+    // worse, could lead outside the roots.
+    assert.equal(walk.truncated, false);
+  });
+
+  /**
+   * The rule the picker inherits from the matrix view: below a root folder lies the
+   * library, which is thousands of media folders and never a destination.
+   */
+  test('lists a directory it is told to stop at, without descending into it', async () => {
+    const movies = path.join(root, 'movies');
+    const walk = await fs.walkDirectories(root, { stopAt: (directory) => directory === movies });
+
+    assert.ok(walk.directories.includes(movies), 'the leaf itself is still offerable');
+    assert.ok(!walk.directories.some((entry) => entry.startsWith(`${movies}${path.sep}`)));
+  });
+
+  test('reports a truncated directory walk rather than a short list that looks whole', async () => {
+    const walk = await fs.walkDirectories(root, { maxEntries: 2 });
+
+    assert.equal(walk.directories.length, 2);
+    assert.equal(walk.truncated, true);
+  });
+
+  test('refuses to walk outside the configured roots', async () => {
+    await assert.rejects(() => fs.walkDirectories(path.join(tmpdir(), 'somewhere-else')), FsError);
+  });
+
   test('reports a truncated walk instead of pretending to be complete', async () => {
     const measured = await fs.measure(root, { maxEntries: 1 });
     assert.equal(measured.truncated, true);

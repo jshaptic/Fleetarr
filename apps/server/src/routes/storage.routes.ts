@@ -4,6 +4,7 @@ import {
   PATH_SELECTORS,
   parsePathFilter,
   queuePayloadSchemas,
+  type FsDirectoriesResponse,
   type FsMeasurement,
   type FsOp,
   type FsPreflight,
@@ -18,6 +19,16 @@ const pathQuery = z.object({ path: z.string().min(1) });
 
 const measureQuery = pathQuery.extend({
   maxEntries: z.coerce.number().int().min(100).max(1_000_000).optional(),
+});
+
+/** `under` is optional: with nothing given the walk starts at every storage root. */
+const directoriesQuery = z.object({
+  under: z.string().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100_000).optional(),
+  refresh: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((value) => value === 'true'),
 });
 
 /** Repeatable `path`: refetching every expanded level is one request, not one per level. */
@@ -82,6 +93,23 @@ export const storageRoutes: FastifyPluginAsync = async (app) => {
     return app.ctx.filesystem.measure(query.path, {
       signal: controller.signal,
       ...(query.maxEntries === undefined ? {} : { maxEntries: query.maxEntries }),
+    });
+  });
+
+  /**
+   * Every directory that could be a destination, flat and cached.
+   *
+   * Deliberately not `/storage/matrix`: that answers what is going on in one level and
+   * summarises a big one down to its problems, which is right for the fleet view and wrong
+   * for a picker. This walks the tree for names alone, and stops at a root folder.
+   */
+  app.get('/storage/directories', async (request): Promise<FsDirectoriesResponse> => {
+    const query = directoriesQuery.parse(request.query);
+
+    return app.ctx.pathMatrix.directories({
+      ...(query.under === undefined ? {} : { under: query.under }),
+      ...(query.limit === undefined ? {} : { limit: query.limit }),
+      refresh: query.refresh,
     });
   });
 

@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import type { PathOwner } from '@fleetarr/shared';
 import BaseButton from '@/components/base/BaseButton.vue';
 import BaseInstanceBadge from '@/components/base/BaseInstanceBadge.vue';
+import { placeAnchored } from '@/lib/anchor';
 import { ownerFacts } from '@/lib/path-matrix';
 import { TONE_CLASSES, type OpPresentation } from '@/lib/staging';
 
@@ -30,9 +31,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{ remove: []; close: [] }>();
 
-const GAP = 6;
-const MARGIN = 8;
-
 const card = ref<HTMLElement | null>(null);
 const placed = ref<{ left: number; top: number } | null>(null);
 
@@ -46,7 +44,8 @@ const TONE_TEXT = {
 } as const;
 
 /**
- * Below the chip, flipped above it when there is no room, clamped to the viewport.
+ * Below the chip, flipped above it when there is no room, clamped to the viewport - the
+ * rule now lives in `placeAnchored`, since the picker's list needs exactly the same one.
  *
  * Measured after mount rather than guessed: the card's height depends on how many facts
  * the owner has, and a card that opens half off-screen is worse than no card.
@@ -56,13 +55,7 @@ function place(): void {
   if (element === null) return;
 
   const { width, height } = element.getBoundingClientRect();
-  const below = props.anchor.bottom + GAP;
-  const flip = below + height > window.innerHeight - MARGIN && props.anchor.top - height - GAP > MARGIN;
-
-  placed.value = {
-    left: Math.max(MARGIN, Math.min(props.anchor.left, window.innerWidth - width - MARGIN)),
-    top: flip ? props.anchor.top - height - GAP : below,
-  };
+  placed.value = placeAnchored({ ...props.anchor, width }, { width, height });
 }
 
 function onKey(event: KeyboardEvent): void {
@@ -99,7 +92,7 @@ onBeforeUnmount(() => {
     class="fixed z-50 w-72 rounded-lg border border-line-strong bg-surface p-3 text-xs shadow-xl"
     :style="{
       left: `${String(placed?.left ?? anchor.left)}px`,
-      top: `${String(placed?.top ?? anchor.bottom + GAP)}px`,
+      top: `${String(placed?.top ?? anchor.bottom)}px`,
       visibility: placed === null ? 'hidden' : 'visible',
     }"
   >
