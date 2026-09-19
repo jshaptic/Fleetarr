@@ -325,6 +325,22 @@ export function prunableFolders(nodes: readonly PathNode[]): PathNode[] {
   );
 }
 
+/**
+ * The other half of `prunableFolders`: what it dropped, and why the batch is still honest.
+ *
+ * The drop itself is right - two `fs.delete`s for a folder and its parent means the second
+ * fails its re-run preflight on `source_exists` and pauses the run. But a dialog that simply
+ * shows fewer folders than were picked is describing a smaller deletion than it performs, so
+ * the absorbed ones are named instead. Only matters now that `prune` is offered for folders
+ * with a library under them, which is what makes an ancestor/descendant pair common.
+ */
+export function absorbedFolders(nodes: readonly PathNode[]): PathNode[] {
+  const eligible = nodes.filter((node) => actionsFor(node).includes('prune'));
+  return eligible.filter((node) =>
+    eligible.some((other) => other !== node && isUnder(node.path, other.path)),
+  );
+}
+
 /** Strictly under: a path is never its own ancestor. */
 function isUnder(target: string, ancestor: string): boolean {
   return target.startsWith(`${ancestor}/`);
@@ -608,16 +624,13 @@ export function actionsFor(node: PathNode): PathAction[] {
 
   if (node.exists && node.kind === 'directory') {
     if (!flags.has('mount')) {
-      actions.push('rename', 'move');
-      // Pruning is only offered when nothing anywhere would lose media by it, and when no
-      // instance roots below it: deleting the parent of an empty-but-configured root
-      // folder takes out a root folder that has no media to speak for it. An instance
-      // that did not answer is not an owner, so it contributes neither - the same
-      // conclusion the old `!cell.known || cell.mediaUnder === 0` check reached.
-      const holdsSomething = node.owners.some(
-        (owner) => owner.mediaUnder > 0 || owner.rootFoldersUnder.length > 0,
-      );
-      if (!holdsSomething) actions.push('prune');
+      // Prune is offered for every real folder, including ones with a library or a nested
+      // root folder under them. It used to be hidden for those, which read as "this folder
+      // cannot be deleted" when the truth was "deleting it would cost you something" - and
+      // the delete preflight now names that something exactly, per instance and per reason,
+      // and offers to unassign or disable what it can. A dialog that says "3 instances track
+      // 412 items here" is a better answer than a missing button.
+      actions.push('rename', 'move', 'prune');
     }
     if (node.expandable) actions.push('focus');
   }

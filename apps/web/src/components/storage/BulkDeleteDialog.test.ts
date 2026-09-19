@@ -35,16 +35,33 @@ const push = vi.fn((items: readonly NewQueueItem[]) =>
 
 /** Per-path checks, so one selection can mix deletable and blocked folders. */
 const checksByPath: Record<string, FsCheck[]> = {};
+/** Per-path *Arr claims, for the folders whose refusal a staged operation could clear. */
+const referencesByPath: Record<string, unknown[]> = {};
 
-const preflight = vi.fn((_op: string, payload: { path: string }) =>
-  Promise.resolve({
-    op: 'fs.delete',
-    ok: !(checksByPath[payload.path] ?? []).some((check) => check.status === 'blocker'),
-    checks: checksByPath[payload.path] ?? [],
-    measurement: null,
-    freeSpace: null,
-    referencedBy: [],
-  }),
+/** A claim a staged operation clears comes back a warning, as the server's answer would. */
+const BRIDGED: Record<string, 'rootFolders' | 'importLists'> = {
+  root_folder_under: 'rootFolders',
+  import_list_under: 'importLists',
+};
+
+const preflight = vi.fn(
+  (_op: string, payload: { path: string }, assumeResolved: Record<string, boolean> = {}) => {
+    const checks = (checksByPath[payload.path] ?? []).map((check) => {
+      const key = BRIDGED[check.id];
+      return key !== undefined && assumeResolved[key] === true
+        ? { ...check, status: 'warning' as const }
+        : check;
+    });
+    return Promise.resolve({
+      op: 'fs.delete',
+      ok: !checks.some((check) => check.status === 'blocker'),
+      checks,
+      measurement: null,
+      freeSpace: null,
+      referencedBy: [],
+      references: referencesByPath[payload.path] ?? [],
+    });
+  },
 );
 
 vi.mock('@/api/storage', () => ({
@@ -79,9 +96,9 @@ const BulkDeleteDialog = (await import('./BulkDeleteDialog.vue')).default;
 
 const EMPTY: FsCheck = { id: 'empty', status: 'ok', message: 'Directory is empty' };
 const UNREFERENCED: FsCheck = {
-  id: 'referenced_by_arr',
+  id: 'media_under',
   status: 'ok',
-  message: 'No connected instance references this path',
+  message: 'No instance tracks media at or under this path',
 };
 
 function node(path: string): PathNode {
@@ -145,6 +162,7 @@ beforeEach(() => {
   push.mockClear();
   preflight.mockClear();
   for (const key of Object.keys(checksByPath)) delete checksByPath[key];
+  for (const key of Object.keys(referencesByPath)) delete referencesByPath[key];
   nextId = 1;
 });
 
@@ -159,11 +177,47 @@ describe('BulkDeleteDialog', () => {
     find('bulk-delete-stage')?.click();
     for (let tick = 0; tick < 6; tick += 1) await flushPromises();
 
-    expect(push.mock.calls).toHaveLength(1);
-    expect(push.mock.calls[0]?.[0]).toEqual([
+    // One POST per folder rather than one batch: a folder whose *Arr side has to be cleared
+    // first needs its own chain, and its ids only come back one response at a time.
+    expect(push.mock.calls).toHaveLength(2);
+    expect(push.mock.calls.flatMap((call) => call[0])).toEqual([
       { op: 'fs.delete', payload: { path: '/data/a', recursive: false, force: false } },
       { op: 'fs.delete', payload: { path: '/data/b', recursive: false, force: false } },
     ]);
+    wrapper.unmount();
+  });
+
+  it('clears each folder\'s own *Arr claim in front of its own delete', async () => {
+    checksByPath['/data/a'] = [
+      EMPTY,
+      { id: 'root_folder_under', status: 'blocker', message: '1 root folder(s) live here' },
+    ];
+    referencesByPath['/data/a'] = [
+      {
+        instanceId: 3,
+        instanceName: 'Radarr-HD',
+        rootFolders: [{ id: 9, path: '/data/a' }],
+        mediaUnder: 0,
+        importLists: [],
+      },
+    ];
+    // Nothing claims /data/b, so the batch-wide checkbox must leave it a lone delete.
+    checksByPath['/data/b'] = [EMPTY, UNREFERENCED];
+    const wrapper = await mountDialog([node('/data/a'), node('/data/b')]);
+
+    find('bulk-delete-unassign')?.dispatchEvent(new MouseEvent('click'));
+    for (let tick = 0; tick < 8; tick += 1) await flushPromises();
+
+    type('2');
+    await flushPromises();
+    find('bulk-delete-stage')?.click();
+    for (let tick = 0; tick < 8; tick += 1) await flushPromises();
+
+    const ops = push.mock.calls.flatMap((call) => call[0] as { op: string; payload: unknown }[]);
+    expect(ops.map((entry) => entry.op)).toEqual(['rootFolder.delete', 'fs.delete', 'fs.delete']);
+    expect(ops[1]).toMatchObject({ dependsOnId: 1 });
+    // The one with no claim is not dragged into a chain it has no reason to wait on.
+    expect(ops[2]).toEqual({ op: 'fs.delete', payload: { path: '/data/b', recursive: false, force: false } });
     wrapper.unmount();
   });
 
@@ -184,7 +238,7 @@ describe('BulkDeleteDialog', () => {
     find('bulk-delete-stage')?.click();
     for (let tick = 0; tick < 6; tick += 1) await flushPromises();
 
-    expect(push.mock.calls[0]?.[0]).toEqual([
+    expect(push.mock.calls.flatMap((call) => call[0])).toEqual([
       { op: 'fs.delete', payload: { path: '/data/a', recursive: false, force: false } },
     ]);
     wrapper.unmount();
@@ -224,7 +278,7 @@ describe('BulkDeleteDialog', () => {
     find('bulk-delete-stage')?.click();
     for (let tick = 0; tick < 6; tick += 1) await flushPromises();
 
-    expect(push.mock.calls[0]?.[0]).toEqual([
+    expect(push.mock.calls.flatMap((call) => call[0])).toEqual([
       { op: 'fs.delete', payload: { path: '/data/a', recursive: true, force: false } },
       { op: 'fs.delete', payload: { path: '/data/b', recursive: true, force: false } },
     ]);

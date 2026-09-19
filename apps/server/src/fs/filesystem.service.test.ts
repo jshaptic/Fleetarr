@@ -3,14 +3,38 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, write
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
+import type { FsPathReference, PathImportList } from '@fleetarr/shared';
 import { FsError } from '../lib/errors.js';
 import { FilesystemService } from './filesystem.service.js';
 import { PathGuard } from './paths.js';
 
-async function makeService(roots: string[], references: readonly number[] = []): Promise<FilesystemService> {
+/** One instance's claim on a path, defaulting to "roots here, holds nothing". */
+function reference(instanceId: number, claim: Partial<FsPathReference> = {}): FsPathReference {
+  return {
+    instanceId,
+    instanceName: `instance-${String(instanceId)}`,
+    rootFolders: [{ id: instanceId * 10, path: '/does-not-matter' }],
+    mediaUnder: 0,
+    importLists: [],
+    ...claim,
+  };
+}
+
+function list(claim: Partial<PathImportList> = {}): PathImportList {
+  return { id: 1, name: 'Trending', enabled: true, automatic: true, path: '/x', ...claim };
+}
+
+async function makeService(
+  roots: string[],
+  references: readonly FsPathReference[] = [],
+): Promise<FilesystemService> {
   const guard = await PathGuard.create(roots);
   const service = new FilesystemService(guard);
-  service.setReferenceLookup(async () => ({ instanceIds: references, complete: true }));
+  service.setReferenceLookup(async () => ({
+    instances: references,
+    instanceIds: references.map((entry) => entry.instanceId),
+    complete: true,
+  }));
   return service;
 }
 
@@ -267,7 +291,7 @@ describe('FilesystemService', () => {
   });
 
   test('warns, but does not refuse, when a relocation moves a folder an instance points at', async () => {
-    const tracked = await makeService([root], [7]);
+    const tracked = await makeService([root], [reference(7)]);
 
     const preflight = await tracked.preflight('fs.rename', {
       from: path.join(root, 'movies'),
@@ -297,7 +321,7 @@ describe('FilesystemService', () => {
     const guard = await PathGuard.create([root]);
     const blind = new FilesystemService(guard);
     // An instance exists but nothing about it is cached: "unknown" is not "cleared".
-    blind.setReferenceLookup(async () => ({ instanceIds: [], complete: false }));
+    blind.setReferenceLookup(async () => ({ instances: [], instanceIds: [], complete: false }));
 
     const refused = await blind.preflight('fs.delete', {
       path: path.join(root, 'movies', 'Arrival (2016)'),
@@ -306,7 +330,7 @@ describe('FilesystemService', () => {
     });
 
     assert.equal(refused.ok, false);
-    const check = refused.checks.find((entry) => entry.id === 'referenced_by_arr');
+    const check = refused.checks.find((entry) => entry.id === 'references_unknown');
     assert.equal(check?.status, 'blocker');
     assert.match(check?.message ?? '', /cannot tell/);
 
@@ -318,8 +342,8 @@ describe('FilesystemService', () => {
     assert.equal(forced.ok, true, 'force is the deliberate override');
   });
 
-  test('refuses to delete a folder an instance still references, unless forced', async () => {
-    const guarded = await makeService([root], [7]);
+  test('refuses to delete a folder an instance still roots at, unless forced', async () => {
+    const guarded = await makeService([root], [reference(7)]);
     const target = path.join(root, 'movies', 'Arrival (2016)');
 
     const refused = await guarded.preflight('fs.delete', { path: target, recursive: true, force: false });
@@ -336,7 +360,104 @@ describe('FilesystemService', () => {
 
     const forced = await guarded.preflight('fs.delete', { path: target, recursive: true, force: true });
     assert.equal(forced.ok, true);
-    assert.equal(forced.checks.find((check) => check.id === 'referenced_by_arr')?.status, 'warning');
+    assert.equal(forced.checks.find((check) => check.id === 'root_folder_under')?.status, 'warning');
+  });
+
+  test('names each reason separately, so a registration is not reported as lost media', async () => {
+    const rooted = await makeService([root], [reference(7)]);
+    const target = path.join(root, 'movies', 'Arrival (2016)');
+
+    const preflight = await rooted.preflight('fs.delete', { path: target, recursive: true, force: false });
+
+    const rootFolder = preflight.checks.find((check) => check.id === 'root_folder_under');
+    assert.equal(rootFolder?.status, 'blocker');
+    assert.match(rootFolder?.message ?? '', /root folder\(s\) on 1 instance\(s\)/);
+    // The old single check called this "still have media at this path". It has none.
+    assert.equal(preflight.checks.find((check) => check.id === 'media_under')?.status, 'ok');
+    assert.equal(preflight.checks.find((check) => check.id === 'import_list_under')?.status, 'ok');
+  });
+
+  test('a staged unassign clears the root folder refusal, where force is not needed at all', async () => {
+    const rooted = await makeService([root], [reference(7)]);
+    const target = path.join(root, 'movies', 'Arrival (2016)');
+    const payload = { path: target, recursive: true, force: false };
+
+    const bridged = await rooted.preflight('fs.delete', payload, { rootFolders: true });
+
+    assert.equal(bridged.ok, true, 'clearing the claim satisfies the guard rather than overruling it');
+    const check = bridged.checks.find((entry) => entry.id === 'root_folder_under');
+    assert.equal(check?.status, 'warning');
+    assert.match(check?.message ?? '', /staged operation/);
+    // And the claim is still described, so the dialog can name what it will unassign.
+    assert.deepEqual(bridged.references[0]?.rootFolders, [{ id: 70, path: '/does-not-matter' }]);
+  });
+
+  test('tracked media is not bridgeable - unassigning leaves every stored path where it was', async () => {
+    const tracking = await makeService([root], [
+      reference(7, { rootFolders: [], mediaUnder: 412 }),
+    ]);
+    const payload = { path: path.join(root, 'movies', 'Arrival (2016)'), recursive: true, force: false };
+
+    const bridged = await tracking.preflight('fs.delete', payload, {
+      rootFolders: true,
+      importLists: true,
+    });
+
+    assert.equal(bridged.ok, false, 'nothing the dialog can stage rewrites a media path');
+    const check = bridged.checks.find((entry) => entry.id === 'media_under');
+    assert.equal(check?.status, 'blocker');
+    assert.match(check?.message ?? '', /412 media item\(s\)/);
+  });
+
+  test('an import list is graded by what it does unattended', async () => {
+    const target = path.join(root, 'movies', 'Arrival (2016)');
+    const payload = { path: target, recursive: true, force: false };
+    const withList = async (entry: PathImportList): Promise<string | undefined> => {
+      const service = await makeService([root], [
+        reference(7, { rootFolders: [], importLists: [entry] }),
+      ]);
+      const preflight = await service.preflight('fs.delete', payload);
+      return preflight.checks.find((check) => check.id === 'import_list_under')?.status;
+    };
+
+    // It will recreate the folder on its next sync with nobody watching.
+    assert.equal(await withList(list({ enabled: true, automatic: true })), 'blocker');
+    // Enabled but manual: worth saying, not worth refusing over.
+    assert.equal(await withList(list({ enabled: true, automatic: false })), 'warning');
+    // Disabled changes nothing on its own, so it is not a finding.
+    assert.equal(await withList(list({ enabled: false, automatic: true })), 'ok');
+  });
+
+  test('disabling the lists clears both the refusal and the warning in one answer', async () => {
+    const service = await makeService([root], [
+      reference(7, {
+        rootFolders: [],
+        importLists: [list({ id: 1, automatic: true }), list({ id: 2, automatic: false })],
+      }),
+    ]);
+    const payload = { path: path.join(root, 'movies', 'Arrival (2016)'), recursive: true, force: false };
+
+    const bridged = await service.preflight('fs.delete', payload, { importLists: true });
+
+    assert.equal(bridged.ok, true);
+    const check = bridged.checks.find((entry) => entry.id === 'import_list_under');
+    assert.equal(check?.status, 'warning');
+    assert.match(check?.message ?? '', /2 enabled import list\(s\).*staged operation/);
+  });
+
+  test('a fleet it could not read is never bridgeable - a promise about the unseen is worth nothing', async () => {
+    const guard = await PathGuard.create([root]);
+    const blind = new FilesystemService(guard);
+    blind.setReferenceLookup(async () => ({ instances: [], instanceIds: [], complete: false }));
+
+    const bridged = await blind.preflight(
+      'fs.delete',
+      { path: path.join(root, 'movies', 'Arrival (2016)'), recursive: true, force: false },
+      { rootFolders: true, importLists: true },
+    );
+
+    assert.equal(bridged.ok, false);
+    assert.equal(bridged.checks.find((check) => check.id === 'references_unknown')?.status, 'blocker');
   });
 
   test('refuses to delete a configured root', async () => {

@@ -343,6 +343,86 @@ describe('fleet fan-out', () => {
   });
 });
 
+describe('stageFolderDeletions', () => {
+  it('clears the *Arr claims first, then deletes - and does not force what it satisfied', async () => {
+    const queue = useQueueStore();
+
+    await queue.stageFolderDeletions([
+      {
+        path: '/data/media/spare',
+        recursive: true,
+        force: false,
+        unassign: [
+          { instanceId: 1, rootFolderId: 5, path: '/data/media/spare' },
+          { instanceId: 2, rootFolderId: 6, path: '/data/media/spare/tv' },
+        ],
+        disableLists: [{ instanceId: 2, importListId: 9 }],
+      },
+    ]);
+
+    const ops = push.mock.calls.flatMap((call) => call[0]);
+    expect(ops.map((entry: { op: string }) => entry.op)).toEqual([
+      'rootFolder.delete',
+      'rootFolder.delete',
+      'importList.setEnabled',
+      'fs.delete',
+    ]);
+
+    // A single chain: each item names the one before it, so the delete cannot run until
+    // every claim it was meant to satisfy actually has been.
+    expect(ops[0]).not.toHaveProperty('dependsOnId');
+    expect(ops[1]).toMatchObject({ dependsOnId: 1 });
+    expect(ops[2]).toMatchObject({ dependsOnId: 2 });
+    expect(ops[3]).toMatchObject({ dependsOnId: 3 });
+
+    // Both flags, because `automatic` is read from enableAuto/enableAutomaticAdd and never
+    // consults `enabled` - leaving the add flag on keeps the list looking automatic.
+    expect(ops[2]).toMatchObject({
+      payload: { importListId: 9, enabled: false, enableAutomaticAdd: false },
+    });
+    // The whole point of the chain: the guard is satisfied, not overruled.
+    expect(ops[3]).toMatchObject({
+      payload: { path: '/data/media/spare', recursive: true, force: false },
+    });
+  });
+
+  it('is one lone fs.delete when nothing claims the folder', async () => {
+    const queue = useQueueStore();
+
+    await queue.stageFolderDeletions([
+      { path: '/data/media/spare', recursive: false, force: false, unassign: [], disableLists: [] },
+    ]);
+
+    const ops = push.mock.calls.flatMap((call) => call[0]);
+    expect(ops).toEqual([
+      { op: 'fs.delete', payload: { path: '/data/media/spare', recursive: false, force: false } },
+    ]);
+  });
+
+  it('keeps folders independent, so one bad chain cannot take the others with it', async () => {
+    const queue = useQueueStore();
+
+    await queue.stageFolderDeletions([
+      {
+        path: '/data/a',
+        recursive: false,
+        force: false,
+        unassign: [{ instanceId: 1, rootFolderId: 5, path: '/data/a' }],
+        disableLists: [],
+      },
+      { path: '/data/b', recursive: false, force: false, unassign: [], disableLists: [] },
+    ]);
+
+    const ops = push.mock.calls.flatMap((call) => call[0]);
+    // /data/b waits on nothing: it had no claim to clear, so chaining it behind another
+    // folder's unassign would only give it a way to be skipped.
+    expect(ops[2]).toEqual({
+      op: 'fs.delete',
+      payload: { path: '/data/b', recursive: false, force: false },
+    });
+  });
+});
+
 describe('staged overlay and impact', () => {
   it('indexes staged operations by instance and label, including both sides of a rename', async () => {
     list.mockResolvedValue({

@@ -122,11 +122,23 @@ describe('filesystem operations in the unified queue', () => {
 
     assert.equal(refused.body.ok, false);
     assert.deepEqual(refused.body.referencedBy, [instanceId]);
+    // The instance holds a film here, which is the one claim no staged operation can clear.
     assert.equal(
-      refused.body.checks.find((check) => check.id === 'referenced_by_arr')?.status,
+      refused.body.checks.find((check) => check.id === 'media_under')?.status,
       'blocker',
     );
     assert.equal(refused.body.measurement?.sizeOnDisk, 4096);
+
+    // And `assumeResolved` does not launder it: the dialog can only promise what it stages.
+    const stillRefused = await api<FsPreflight>(server.url, '/storage/preflight', {
+      method: 'POST',
+      body: {
+        op: 'fs.delete',
+        payload: { path: path.join(movies(), 'Arrival (2016)'), recursive: true, force: false },
+        assumeResolved: { rootFolders: true, importLists: true },
+      },
+    });
+    assert.equal(stillRefused.body.ok, false);
 
     const allowed = await api<FsPreflight>(server.url, '/storage/preflight', {
       method: 'POST',
@@ -335,6 +347,52 @@ describe('filesystem operations in the unified queue', () => {
     assert.equal(finished.run.status, 'completed');
     assert.equal(statSync(path.join(media, 'library')).isDirectory(), true);
     assert.ok(arr.state.rootFolders.some((folder) => folder.path === path.join(media, 'library')));
+  });
+
+  test('refuses a reorder that would put a delete ahead of the unassign protecting it', async () => {
+    await api(server.url, '/queue', { method: 'DELETE' });
+
+    const unassign = await api<{ items: QueueItem[] }>(server.url, '/queue', {
+      method: 'POST',
+      body: {
+        instanceId,
+        op: 'rootFolder.delete',
+        payload: { rootFolderId: 1, path: path.join(media, 'library') },
+      },
+    });
+    const producerId = unassign.body.items[0]?.id ?? 0;
+    const deletion = await api<{ items: QueueItem[] }>(server.url, '/queue', {
+      method: 'POST',
+      body: {
+        op: 'fs.delete',
+        payload: { path: path.join(media, 'library'), recursive: true, force: false },
+        dependsOnId: producerId,
+      },
+    });
+    const dependentId = deletion.body.items[0]?.id ?? 0;
+
+    // The executor takes items strictly in sort order and never defers: a dependent whose
+    // producer has not run is skipped for good. So this order would not reorder the chain,
+    // it would drop the unassign's whole reason for existing and delete the folder anyway.
+    const refused = await api<ErrorBody>(server.url, '/queue/reorder', {
+      method: 'PATCH',
+      body: { itemIds: [dependentId, producerId] },
+    });
+
+    assert.equal(refused.status, 400);
+    assert.match(refused.body.error.message, /depends on/);
+
+    // The order it was staged in is still accepted.
+    const allowed = await api<{ items: QueueItem[] }>(server.url, '/queue/reorder', {
+      method: 'PATCH',
+      body: { itemIds: [producerId, dependentId] },
+    });
+    assert.equal(allowed.status, 200);
+
+    // Staged but never run, and `DELETE /queue` only clears finished work - so these two
+    // have to go by id, or the next test's run would apply them to the shared library.
+    await api(server.url, `/queue/${String(dependentId)}`, { method: 'DELETE' });
+    await api(server.url, `/queue/${String(producerId)}`, { method: 'DELETE' });
   });
 
   test('pruning an orphan reports what it reclaimed', async () => {

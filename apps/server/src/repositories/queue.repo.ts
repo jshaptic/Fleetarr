@@ -147,6 +147,24 @@ export class QueueRepository {
       });
     }
 
+    // The executor takes items strictly in sort_order and never defers: a dependent whose
+    // producer has not run yet is *skipped*, permanently, not retried. So an order that
+    // puts one before the other does not reorder the chain, it silently deletes half of
+    // it - and the half that survives is whichever the user did not think about.
+    const position = new Map(itemIds.map((id, index) => [id, index]));
+    for (const item of pending) {
+      if (item.dependsOnId === null) continue;
+      const producer = position.get(item.dependsOnId);
+      const dependent = position.get(item.id);
+      if (producer === undefined || dependent === undefined) continue;
+      if (producer > dependent) {
+        throw new ValidationError(
+          `Queue item ${String(item.id)} depends on ${String(item.dependsOnId)} and cannot run before it`,
+          { item: item.id, dependsOnId: item.dependsOnId },
+        );
+      }
+    }
+
     const update = this.db.prepare('UPDATE queue_items SET sort_order = @sortOrder, updated_at = @at WHERE id = @id');
     const apply = this.db.transaction((ids: readonly number[]): void => {
       const at = nowIso();

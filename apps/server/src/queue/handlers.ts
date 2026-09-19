@@ -351,6 +351,16 @@ export const arrHandlers: ArrQueueHandlers = {
       patch['enableAutomaticAdd'] = item.payload.enableAutomaticAdd;
     }
 
+    // A silent no-op is the dangerous outcome here, not a failure: a folder delete can be
+    // staged behind this op precisely because the list will stop adding, and an instance
+    // whose raw body omits every switch would report success having changed nothing.
+    if (Object.keys(patch).length === 0) {
+      ctx.log(
+        'warn',
+        `This ${ctx.instance.kind} import list exposes no enabled/enableAuto field - nothing was changed`,
+      );
+    }
+
     const updated = await ctx.client.putImportList(
       item.payload.importListId,
       mergeForPut(current.raw, patch),

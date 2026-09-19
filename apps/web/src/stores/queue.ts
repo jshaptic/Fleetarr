@@ -44,6 +44,30 @@ export interface RootFolderTarget {
   readonly path: string;
 }
 
+/**
+ * One folder to delete, plus whatever *Arr still has registered against it.
+ *
+ * `force` and the two lists are alternatives, not companions: the lists satisfy the guard
+ * by clearing the registration, `force` overrules it. A plan with empty lists and
+ * `force: false` is the ordinary case - a folder nothing claims.
+ */
+export interface FolderDeletionPlan {
+  readonly path: string;
+  readonly recursive: boolean;
+  readonly force: boolean;
+  /** Root folders at or under the path, one `rootFolder.delete` each, run before the delete. */
+  readonly unassign: ReadonlyArray<{
+    readonly instanceId: number;
+    readonly rootFolderId: number;
+    readonly path: string;
+  }>;
+  /** Enabled lists aimed here - disabled before the delete so none of them refills it. */
+  readonly disableLists: ReadonlyArray<{
+    readonly instanceId: number;
+    readonly importListId: number;
+  }>;
+}
+
 /** One import list to aim at the new folder, with the path it should fill instead. */
 export interface RemapListTarget {
   readonly importListId: number;
@@ -686,6 +710,81 @@ export const useQueueStore = defineStore('queue', () => {
   }
 
   /**
+   * Delete folders from disk, clearing what *Arr still has registered against them first.
+   *
+   * Unassigning a root folder or disabling an import list is an *Arr write, so it cannot
+   * ride in the `fs.delete` - that op names no instance by contract. It goes in front of
+   * it instead, and the delete waits: the executor invalidates the instance's snapshots
+   * after every *Arr op, so by the time the delete re-runs its preflight the registration
+   * is genuinely gone and it passes with no `force` at all. That is the difference between
+   * this and ticking the box - `force` overrules the guard, this satisfies it.
+   *
+   * Serial per folder, because ids only come back one response at a time and each item may
+   * name a single producer. Folders do not chain to each other: one bad disk step should
+   * cost its own folder, not the rest of the batch.
+   */
+  async function stageFolderDeletions(plans: readonly FolderDeletionPlan[]): Promise<void> {
+    if (plans.length === 0) return;
+
+    busy.value = true;
+    try {
+      for (const plan of plans) {
+        let dependsOnId: number | undefined;
+
+        for (const target of plan.unassign) {
+          const staged = await queueApi.push([
+            {
+              instanceId: target.instanceId,
+              op: 'rootFolder.delete',
+              payload: { rootFolderId: target.rootFolderId, path: target.path },
+              ...(dependsOnId === undefined ? {} : { dependsOnId }),
+            },
+          ]);
+          dependsOnId = staged.items[0]?.id ?? dependsOnId;
+        }
+
+        for (const target of plan.disableLists) {
+          const staged = await queueApi.push([
+            {
+              instanceId: target.instanceId,
+              op: 'importList.setEnabled',
+              // Both flags, not just `enabled`: `automatic` is read from enableAuto /
+              // enableAutomaticAdd and never consults `enabled`, so leaving the add flag
+              // on would keep the list looking automatic to the very guard this satisfies.
+              payload: { importListId: target.importListId, enabled: false, enableAutomaticAdd: false },
+              ...(dependsOnId === undefined ? {} : { dependsOnId }),
+            },
+          ]);
+          dependsOnId = staged.items[0]?.id ?? dependsOnId;
+        }
+
+        await queueApi.push([
+          {
+            op: 'fs.delete',
+            payload: { path: plan.path, recursive: plan.recursive, force: plan.force },
+            ...(dependsOnId === undefined ? {} : { dependsOnId }),
+          },
+        ]);
+      }
+
+      await load();
+      const bridged = plans.filter(
+        (plan) => plan.unassign.length > 0 || plan.disableLists.length > 0,
+      ).length;
+      ui.notify(
+        'success',
+        `Staged the deletion of ${String(plans.length)} folder(s)${bridged > 0 ? ` - ${String(bridged)} with the *Arr side cleared first` : ''}`,
+      );
+      ui.openDrawer();
+    } catch (caught) {
+      ui.notify('error', `Could not stage the deletion: ${messageOf(caught)}`);
+      await load();
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  /**
    * Reconcile & Align: rename a folder on disk, then point each selected root folder at
    * its rewritten path *without* asking *Arr to move anything - the bytes are already there.
    *
@@ -1261,6 +1360,7 @@ export const useQueueStore = defineStore('queue', () => {
     createImportListAcross,
     stageFsOperation,
     stageFsOperations,
+    stageFolderDeletions,
     stageReconcile,
     reorder,
     move,

@@ -1,4 +1,5 @@
 import type {
+  FsAssumeResolved,
   FsMeasurement,
   FsOp,
   FsPreflight,
@@ -504,8 +505,12 @@ export const usePathsStore = defineStore('paths', () => {
     }
   }
 
-  function preflight<K extends FsOp>(op: K, payload: QueuePayloadFor<K>): Promise<FsPreflight> {
-    return storageApi.preflight(op, payload);
+  function preflight<K extends FsOp>(
+    op: K,
+    payload: QueuePayloadFor<K>,
+    assumeResolved?: FsAssumeResolved,
+  ): Promise<FsPreflight> {
+    return storageApi.preflight(op, payload, assumeResolved);
   }
 
   /**

@@ -6,6 +6,14 @@ import BaseCheckbox from '@/components/base/BaseCheckbox.vue';
 import BaseModal from '@/components/base/BaseModal.vue';
 import IconError from '@/components/base/icons/IconError.vue';
 import IconWarning from '@/components/base/icons/IconWarning.vue';
+import {
+  assumeResolved,
+  disableListTargets,
+  needsForce as forceStillNeeded,
+  needsImportListBridge,
+  needsRootFolderBridge,
+  unassignTargets,
+} from '@/lib/delete-bridge';
 import { formatBytes } from '@/lib/format';
 import { unknownColumns } from '@/lib/path-matrix';
 import { usePathsStore } from '@/stores/paths';
@@ -22,7 +30,16 @@ import { useQueueStore } from '@/stores/queue';
  * One `fs.delete` per folder rather than one op over a list, because that is what lets a
  * folder that has changed by the time the run reaches it fail alone.
  */
-const props = defineProps<{ targets: readonly PathNode[] }>();
+const props = defineProps<{
+  targets: readonly PathNode[];
+  /**
+   * Selected folders a target's recursive delete will take along.
+   *
+   * Passed in rather than derived: `targets` has already had them removed, so the dialog
+   * cannot see them, and it must still say they are going.
+   */
+  absorbed?: readonly PathNode[];
+}>();
 const emit = defineEmits<{ close: []; staged: [paths: string[]] }>();
 
 const paths = usePathsStore();
@@ -30,6 +47,9 @@ const queue = useQueueStore();
 
 const recursive = ref(false);
 const force = ref(false);
+/** Batch-wide, like the two above: one answer for the selection, applied per folder. */
+const bridgeRoots = ref(false);
+const bridgeLists = ref(false);
 const typed = ref('');
 
 const results = ref<Record<string, FsPreflight | 'error'>>({});
@@ -45,11 +65,11 @@ async function check(): Promise<void> {
         try {
           return [
             node.path,
-            await paths.preflight('fs.delete', {
-              path: node.path,
-              recursive: recursive.value,
-              force: force.value,
-            }),
+            await paths.preflight(
+              'fs.delete',
+              { path: node.path, recursive: recursive.value, force: force.value },
+              assumeResolved(bridgeRoots.value, bridgeLists.value),
+            ),
           ] as const;
         } catch {
           return [node.path, 'error' as const] as const;
@@ -60,6 +80,20 @@ async function check(): Promise<void> {
   } finally {
     checking.value = false;
   }
+}
+
+/**
+ * Every message at one severity, joined.
+ *
+ * The *Arr side is four checks rather than one, so a folder can be refused for two
+ * unrelated reasons at once - and a row that names only the first would send someone to
+ * fix a root folder when the media underneath was the real answer.
+ */
+function messagesOf(preflight: FsPreflight, status: 'blocker' | 'warning'): string | null {
+  const messages = preflight.checks
+    .filter((check) => check.status === status)
+    .map((check) => check.message);
+  return messages.length === 0 ? null : messages.join(' | ');
 }
 
 interface Row {
@@ -87,15 +121,30 @@ const rows = computed<Row[]>(() =>
     return {
       node,
       preflight,
-      blocker: preflight.checks.find((check) => check.status === 'blocker')?.message ?? null,
-      warning: preflight.checks.find((check) => check.status === 'warning')?.message ?? null,
+      // Every reason, not the first: the *Arr side is four checks now, so a folder that
+      // both roots an instance and holds its media would otherwise confess to only one.
+      blocker: messagesOf(preflight, 'blocker'),
+      warning: messagesOf(preflight, 'warning'),
       size: preflight.measurement?.sizeOnDisk ?? null,
       files: preflight.measurement?.fileCount ?? null,
     };
   }),
 );
 
+const preflights = computed(() =>
+  rows.value
+    .map((row) => row.preflight)
+    .filter((preflight): preflight is FsPreflight => preflight !== undefined && preflight !== 'error'),
+);
+
 const stageable = computed(() => rows.value.filter((row) => row.blocker === null));
+
+/** Folders a parent's recursive delete will take along, named rather than silently dropped. */
+const absorbed = computed(() =>
+  props.targets.filter((node) =>
+    props.targets.some((other) => other !== node && node.path.startsWith(`${other.path}/`)),
+  ),
+);
 const blocked = computed(() => rows.value.filter((row) => row.blocker !== null));
 
 /**
@@ -113,16 +162,17 @@ const needsRecursive = computed(() =>
   ),
 );
 
-const needsForce = computed(() =>
-  rows.value.some(
-    (row) =>
-      row.preflight !== undefined &&
-      row.preflight !== 'error' &&
-      row.preflight.checks.some(
-        (check) => check.id === 'referenced_by_arr' && check.status !== 'ok',
-      ),
-  ),
-);
+/**
+ * The *Arr questions, asked once for the batch.
+ *
+ * A bridge box offers to clear what a staged operation can; `force` is what is left when
+ * nothing can. Each is answered per folder when the batch is staged - a folder with no root
+ * folder of its own contributes no unassign - so one checkbox never acts on a folder the
+ * preflight did not raise it for.
+ */
+const canUnassign = computed(() => preflights.value.some(needsRootFolderBridge));
+const canDisableLists = computed(() => preflights.value.some(needsImportListBridge));
+const needsForce = computed(() => preflights.value.some(forceStillNeeded));
 
 const totalSize = computed(() =>
   stageable.value.reduce((sum, row) => sum + (row.size ?? 0), 0),
@@ -147,12 +197,28 @@ const valid = computed(
 );
 
 async function confirm(): Promise<void> {
-  await queue.stageFsOperations(
-    stageable.value.map((row) => ({
-      op: 'fs.delete' as const,
-      payload: { path: row.node.path, recursive: recursive.value, force: force.value },
-    })),
-    `the deletion of ${String(stageable.value.length)} folder(s) from disk`,
+  await queue.stageFolderDeletions(
+    stageable.value.map((row) => {
+      const preflight = row.preflight === undefined || row.preflight === 'error' ? null : row.preflight;
+      return {
+        path: row.node.path,
+        recursive: recursive.value,
+        force: force.value,
+        unassign: bridgeRoots.value
+          ? unassignTargets(preflight).map((target) => ({
+              instanceId: target.instanceId,
+              rootFolderId: target.rootFolderId,
+              path: target.path,
+            }))
+          : [],
+        disableLists: bridgeLists.value
+          ? disableListTargets(preflight).map((target) => ({
+              instanceId: target.instanceId,
+              importListId: target.importListId,
+            }))
+          : [],
+      };
+    }),
   );
   // Those folders are spoken for now: leaving them ticked invites staging them twice.
   emit('staged', stageable.value.map((row) => row.node.path));
@@ -162,12 +228,17 @@ async function confirm(): Promise<void> {
 onMounted(() => void check());
 
 // A hidden option must not leave a `true` in the payload it no longer explains.
-watch([needsRecursive, needsForce], ([recursiveNeeded, forceNeeded]) => {
-  if (!recursiveNeeded && recursive.value) recursive.value = false;
-  if (!forceNeeded && force.value) force.value = false;
-});
+watch(
+  [needsRecursive, needsForce, canUnassign, canDisableLists],
+  ([recursiveNeeded, forceNeeded, unassignOffered, listsOffered]) => {
+    if (!recursiveNeeded && recursive.value) recursive.value = false;
+    if (!forceNeeded && force.value) force.value = false;
+    if (!unassignOffered && bridgeRoots.value) bridgeRoots.value = false;
+    if (!listsOffered && bridgeLists.value) bridgeLists.value = false;
+  },
+);
 
-watch([recursive, force], () => void check());
+watch([recursive, force, bridgeRoots, bridgeLists], () => void check());
 </script>
 
 <template>
@@ -246,15 +317,53 @@ watch([recursive, force], () => void check());
         </span>
       </label>
 
-      <label v-if="needsForce" class="flex items-start gap-2 text-xs text-muted">
-        <BaseCheckbox v-model="force" data-testid="bulk-delete-force" tone="danger" class="mt-0.5" />
+      <!--
+        The offers come before the override: each stages the *Arr change in front of its
+        folder's delete, so the guard is satisfied rather than overruled, and ticking one
+        can take the force box away entirely.
+      -->
+      <label v-if="canUnassign" class="flex items-start gap-2 text-xs text-muted">
+        <BaseCheckbox v-model="bridgeRoots" data-testid="bulk-delete-unassign" class="mt-0.5" />
         <span>
-          <span class="font-medium text-ink">Delete even though an instance still tracks them</span>
+          <span class="font-medium text-ink">Also unassign the root folders first</span>
           <span class="block text-[11px]">
-            Leaves those instances pointing at paths that no longer exist.
+            Each folder's own root folder registrations are removed from their instances
+            before it is deleted. Folders that have none are unaffected.
           </span>
         </span>
       </label>
+
+      <label v-if="canDisableLists" class="flex items-start gap-2 text-xs text-muted">
+        <BaseCheckbox v-model="bridgeLists" data-testid="bulk-delete-disable-lists" class="mt-0.5" />
+        <span>
+          <span class="font-medium text-ink">Also disable the import lists that fill them</span>
+          <span class="block text-[11px]">
+            Otherwise the next sync recreates the folder each list is aimed at.
+          </span>
+        </span>
+      </label>
+
+      <label v-if="needsForce" class="flex items-start gap-2 text-xs text-muted">
+        <BaseCheckbox v-model="force" data-testid="bulk-delete-force" tone="danger" class="mt-0.5" />
+        <span>
+          <span class="font-medium text-ink">Delete anyway</span>
+          <span class="block text-[11px]">
+            For what nothing staged here can fix - tracked media, or an instance that did not
+            answer. Leaves those instances pointing at paths that no longer exist.
+          </span>
+        </span>
+      </label>
+
+      <!--
+        A selected folder inside another selected folder is dropped, because the parent's
+        recursive delete takes it along - but dropping it silently would leave the batch
+        describing fewer folders than it removes.
+      -->
+      <p v-if="absorbed.length > 0" class="text-[11px] text-drift" data-testid="delete-absorbed">
+        {{ absorbed.length }} selected folder(s) sit inside another selection and are not listed
+        separately - they go with its recursive delete:
+        {{ absorbed.map((node) => node.path).join(', ') }}
+      </p>
 
       <p v-if="stageable.length > 0" class="text-[11px] text-muted" data-testid="delete-total">
         {{ stageable.length }} folder(s) · {{ totalFiles }} file(s) ·

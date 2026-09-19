@@ -85,6 +85,27 @@ export interface FsCheck {
 }
 
 /**
+ * Why one instance's database stands in the way of a path, in enough detail to stage the
+ * fix rather than only to refuse.
+ *
+ * The three claims are deliberately separate. A root folder and an import list are
+ * *registrations* - a staged `rootFolder.delete` or `importList.setEnabled` clears them,
+ * and the delete then needs no `force`. Tracked media is not: unassigning a root folder
+ * leaves every item's stored path untouched, so `mediaUnder` survives it and the only
+ * honest answers are a remap, a `media.delete`, or `force`.
+ */
+export interface FsPathReference {
+  readonly instanceId: number;
+  readonly instanceName: string;
+  /** Its root folders at or *under* the path - a parent's delete takes them all. */
+  readonly rootFolders: readonly PathRootFolderRef[];
+  /** Media items at or under the path. Not cleared by unassigning anything. */
+  readonly mediaUnder: number;
+  /** Lists whose target folder is at or under the path - what refills it after a delete. */
+  readonly importLists: readonly PathImportList[];
+}
+
+/**
  * The answer to "what would happen if I ran this". Returned to the UI before staging and
  * re-run by the executor immediately before the operation, because the disk can change
  * between review and Apply All.
@@ -95,13 +116,33 @@ export interface FsPreflight {
   readonly checks: readonly FsCheck[];
   readonly measurement: FsMeasurement | null;
   readonly freeSpace: number | null;
-  /** Instances whose database references this path - deleting needs `force`. */
+  /** Instances whose database references this path, for any of the reasons below. */
   readonly referencedBy: readonly number[];
+  /** Per instance, *why* - so a dialog can offer to clear it instead of forcing past it. */
+  readonly references: readonly FsPathReference[];
+}
+
+/**
+ * Claims the caller is about to clear itself, so the preflight states the verdict that
+ * will hold once it has.
+ *
+ * Request-only, and deliberately not part of `QueueOpPayloads`: it describes what the
+ * *staging dialog* intends, never what the executor will run. The pre-execution re-run
+ * passes nothing here, so by then the claim has either really gone or the check fires
+ * for real. Without it a dialog would have to predict a safety verdict in the browser,
+ * which is exactly what reading the server's verdict exists to avoid.
+ */
+export interface FsAssumeResolved {
+  /** A `rootFolder.delete` is staged for every root folder at or under the path. */
+  readonly rootFolders?: boolean;
+  /** An `importList.setEnabled` disabling every list that fills the path is staged. */
+  readonly importLists?: boolean;
 }
 
 export interface FsPreflightRequest<K extends FsOp = FsOp> {
   readonly op: K;
   readonly payload: QueuePayloadFor<K>;
+  readonly assumeResolved?: FsAssumeResolved;
 }
 
 /**

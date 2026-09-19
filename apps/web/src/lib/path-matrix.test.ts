@@ -9,6 +9,7 @@ import type {
 } from '@fleetarr/shared';
 import { describe, expect, it } from 'vitest';
 import {
+  absorbedFolders,
   actionsFor,
   flattenLeaves,
   isLeafFolder,
@@ -375,21 +376,26 @@ describe('actionsFor', () => {
     expect(actionsFor(node('/data/media/spare', { canAddRootFolder: true }))).toContain('addRoot');
   });
 
-  it('never offers a prune that would cost an instance its media', () => {
+  it('offers a prune even where it would cost something - the dialog says what', () => {
+    // This used to be hidden, which read as "cannot be deleted" when the truth was "here is
+    // what it would cost". The delete preflight now names the cost per instance and per
+    // reason, and offers to unassign or disable whatever a staged operation can clear.
     const tracked = flagged('/data/media/movies/Dune (2021)', [], [
       owner(1, 'tracked', { mediaUnder: 1 }),
     ]);
-    expect(actionsFor(tracked)).not.toContain('prune');
-  });
+    expect(actionsFor(tracked)).toContain('prune');
 
-  it('never prunes the parent of a root folder, even one with nothing in it yet', () => {
-    // No media anywhere below, so the media-only rule called this safe to delete - and it
-    // would have taken a configured root folder with it.
-    const target = node('/data/media', {
+    const parentOfRoot = node('/data/media', {
       owners: [owner(1, 'containsRoot', { mediaUnder: 0, rootFoldersUnder: [{ id: 2, path: '/data/media/tv' }] })],
     });
+    expect(actionsFor(parentOfRoot)).toContain('prune');
+  });
 
-    expect(actionsFor(target)).not.toContain('prune');
+  it('still never offers a prune on a mount, or on a folder that is not there', () => {
+    // The gate that remains: these are not "expensive", they are impossible.
+    expect(actionsFor(node('/data', { flags: ['mount'] }))).not.toContain('prune');
+    expect(actionsFor(node('/data/media/gone', { flags: ['missing'] }))).not.toContain('prune');
+    expect(actionsFor(node('/elsewhere/movies', { flags: ['unseen'] }))).not.toContain('prune');
   });
 
   it('prunes a folder no owner holds media under - an unreachable instance is not an owner', () => {
@@ -687,7 +693,19 @@ describe('prunableFolders', () => {
       owners: [owner(1, 'tracked', { mediaUnder: 1 })],
     });
 
-    expect(prunableFolders([spare, mount, tracked])).toEqual([spare]);
+    // A tracked folder is deletable now - expensively, and the dialog says so. A mount
+    // never is.
+    expect(prunableFolders([spare, mount, tracked])).toEqual([spare, tracked]);
+  });
+
+  it('names the folders it dropped as covered by a parent, rather than losing them', () => {
+    // `prunableFolders` drops the child; a batch that simply showed one fewer folder would
+    // be describing a smaller deletion than it performs.
+    const parent = node('/data/media/spare', { owners: [] });
+    const child = node('/data/media/spare/2019', { owners: [] });
+
+    expect(absorbedFolders([parent, child])).toEqual([child]);
+    expect(absorbedFolders([parent])).toEqual([]);
   });
 
   it('drops a selected folder that another selected folder already contains', () => {

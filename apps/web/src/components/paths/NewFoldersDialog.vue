@@ -87,6 +87,7 @@ async function preflightOne(path: string): Promise<FsPreflight> {
       measurement: null,
       freeSpace: null,
       referencedBy: [],
+      references: [],
     };
   }
 }

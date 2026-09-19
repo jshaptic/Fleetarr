@@ -455,7 +455,7 @@ watch(crossDevice, (crosses) => {
 <template>
   <BaseModal
     title="Switch root folder"
-    :subtitle="`${props.fromPath} - *Arr moves the media to the new folder and roots there instead`"
+    :subtitle=props.fromPath
     width="lg"
     @close="emit('close')"
   >

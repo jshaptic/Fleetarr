@@ -56,17 +56,60 @@ const renamePreflight = () =>
 
 const preflight = vi.fn(renamePreflight);
 
-function deletePreflight(checks: { id: string; status: string; message: string }[]) {
-  return () =>
-    Promise.resolve({
+/**
+ * Stands in for `preflightDelete`, including the half that makes the bridge work: a claim
+ * the caller says it will clear comes back downgraded to a warning. Without that the mock
+ * would answer "blocker" forever and no dialog could ever stage past one.
+ */
+const BRIDGED: Record<string, 'rootFolders' | 'importLists'> = {
+  root_folder_under: 'rootFolders',
+  import_list_under: 'importLists',
+};
+
+function deletePreflight(
+  checks: { id: string; status: string; message: string }[],
+  references: unknown[] = [],
+) {
+  return (_op: string, _payload: unknown, assumeResolved: Record<string, boolean> = {}) => {
+    const answered = checks.map((check) => {
+      const key = BRIDGED[check.id];
+      return key !== undefined && assumeResolved[key] === true
+        ? { ...check, status: 'warning' }
+        : check;
+    });
+    return Promise.resolve({
       op: 'fs.delete',
-      ok: !checks.some((check) => check.status === 'blocker'),
-      checks,
+      ok: !answered.some((check) => check.status === 'blocker'),
+      checks: answered,
       measurement: null,
       freeSpace: null,
       referencedBy: [],
+      references,
     });
+  };
 }
+
+/** One instance rooting at the folder - the claim an unassign can clear. */
+const ROOTED_AT = [
+  {
+    instanceId: 3,
+    instanceName: 'Radarr-HD',
+    rootFolders: [{ id: 9, path: '/data/movies' }],
+    mediaUnder: 0,
+    importLists: [],
+  },
+];
+
+/** One enabled, automatic list aimed here - the claim disabling can clear. */
+const FED_BY_LIST = [
+  {
+    instanceId: 4,
+    instanceName: 'Sonarr',
+    rootFolders: [],
+    mediaUnder: 0,
+    importLists: [{ id: 7, name: 'Trending', enabled: true, automatic: true, path: '/data/movies' }],
+  },
+];
 
 vi.mock('@/api/storage', () => ({
   storageApi: {
@@ -270,19 +313,20 @@ describe('DiskOperationModal', () => {
 
   const EMPTY = { id: 'empty', status: 'ok', message: 'Directory is empty' };
   const UNREFERENCED = {
-    id: 'referenced_by_arr',
+    id: 'media_under',
     status: 'ok',
-    message: 'No connected instance references this path',
+    message: 'No instance tracks media at or under this path',
   };
 
   async function mountDelete(
     checks: { id: string; status: string; message: string }[],
+    references: unknown[] = [],
   ): Promise<ReturnType<typeof mount>> {
-    preflight.mockImplementation(deletePreflight(checks) as never);
+    preflight.mockImplementation(deletePreflight(checks, references) as never);
     return mountDialog({ operation: 'delete', alignTargets: [] });
   }
 
-  function box(name: 'recursive' | 'force'): Element | null {
+  function box(name: 'recursive' | 'force' | 'unassign' | 'disable-lists'): Element | null {
     return document.body.querySelector(`[data-testid="delete-${name}"]`);
   }
 
@@ -307,14 +351,78 @@ describe('DiskOperationModal', () => {
     wrapper.unmount();
   });
 
-  it('asks only about the instance when one still references the path', async () => {
+  it('offers force, and only force, for the one claim nothing staged can clear', async () => {
     const wrapper = await mountDelete([
       EMPTY,
-      { id: 'referenced_by_arr', status: 'blocker', message: '1 connected instance(s) still have media here' },
+      { id: 'media_under', status: 'blocker', message: '1 instance(s) still track 412 media item(s)' },
     ]);
 
     expect(box('recursive')).toBeNull();
     expect(box('force')).not.toBeNull();
+    // Media is not a registration: there is nothing to unassign or disable.
+    expect(box('unassign')).toBeNull();
+    expect(box('disable-lists')).toBeNull();
+    wrapper.unmount();
+  });
+
+  it('offers to unassign a root folder rather than to force past it', async () => {
+    const wrapper = await mountDelete(
+      [
+        EMPTY,
+        { id: 'root_folder_under', status: 'blocker', message: '1 root folder(s) on 1 instance(s) live here' },
+      ],
+      ROOTED_AT,
+    );
+
+    expect(box('unassign')).not.toBeNull();
+    // The whole point: this refusal is bridgeable, so force is not what it asks for.
+    expect(box('force')).toBeNull();
+    expect(document.body.textContent).toContain('Radarr-HD');
+    wrapper.unmount();
+  });
+
+  it('offers to disable a list that would otherwise recreate the folder', async () => {
+    const wrapper = await mountDelete(
+      [
+        EMPTY,
+        { id: 'import_list_under', status: 'blocker', message: '1 enabled import list(s) add here automatically' },
+      ],
+      FED_BY_LIST,
+    );
+
+    expect(box('disable-lists')).not.toBeNull();
+    expect(box('force')).toBeNull();
+    expect(document.body.textContent).toContain('Trending');
+    wrapper.unmount();
+  });
+
+  it('stages the unassign in front of the delete, and does not force it', async () => {
+    const wrapper = await mountDelete(
+      [
+        EMPTY,
+        { id: 'root_folder_under', status: 'blocker', message: '1 root folder(s) live here' },
+      ],
+      ROOTED_AT,
+    );
+
+    box('unassign')?.dispatchEvent(new MouseEvent('click'));
+    for (let tick = 0; tick < 8; tick += 1) await flushPromises();
+
+    // The server said ok once `assumeResolved` was asserted, so staging is allowed.
+    const confirm = document.body.querySelector<HTMLInputElement>('input[autocomplete="off"]');
+    if (confirm) {
+      confirm.value = 'movies';
+      confirm.dispatchEvent(new Event('input'));
+    }
+    for (let tick = 0; tick < 4; tick += 1) await flushPromises();
+    stageButton()?.click();
+    for (let tick = 0; tick < 8; tick += 1) await flushPromises();
+
+    const ops = push.mock.calls.flatMap((call) => call[0] as { op: string; payload: unknown }[]);
+    expect(ops.map((entry) => entry.op)).toEqual(['rootFolder.delete', 'fs.delete']);
+    expect(ops[0]?.payload).toEqual({ rootFolderId: 9, path: '/data/movies' });
+    // Satisfied, not overruled.
+    expect(ops[1]?.payload).toEqual({ path: ROOT, recursive: false, force: false });
     wrapper.unmount();
   });
 
@@ -333,7 +441,7 @@ describe('DiskOperationModal', () => {
   it('drops an option from the payload when it stops being asked about', async () => {
     const wrapper = await mountDelete([
       { id: 'recursive_required', status: 'blocker', message: 'not empty' },
-      { id: 'referenced_by_arr', status: 'blocker', message: 'still referenced' },
+      { id: 'media_under', status: 'blocker', message: 'still tracked' },
     ]);
 
     box('recursive')?.dispatchEvent(new MouseEvent('click'));

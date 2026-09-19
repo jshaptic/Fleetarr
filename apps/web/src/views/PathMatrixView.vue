@@ -16,6 +16,7 @@ import { basename, breadcrumbs, parentOf } from '@/lib/fs-tree';
 import { formatBytes, formatRelativeTime } from '@/lib/format';
 import { quoteFolderName } from '@/lib/new-folders';
 import {
+  absorbedFolders,
   alignTargetsFor,
   prunableFolders,
   rootFolderTargets,
@@ -94,6 +95,9 @@ const deletable = computed<RootFolderTarget[]>(() =>
  * is not deletable - so the button says how many and the toolbar says how many were left out.
  */
 const prunable = computed(() => prunableFolders(selectedNodes.value));
+
+/** What `prunable` dropped as covered by a parent - the batch names them rather than hiding them. */
+const absorbed = computed(() => absorbedFolders(selectedNodes.value));
 
 function toggleSelected(path: string): void {
   selected.value = selected.value.includes(path)
@@ -672,6 +676,7 @@ environment:
     <BulkDeleteDialog
       v-if="pruning"
       :targets="pruning"
+      :absorbed="absorbed"
       @staged="selected = selected.filter((path) => !$event.includes(path))"
       @close="pruning = null"
     />

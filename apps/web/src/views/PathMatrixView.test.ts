@@ -1187,12 +1187,14 @@ describe('PathMatrixView', () => {
     await wrapper.find('[data-testid="select-all"]').trigger('change');
     await flushPromises();
 
-    // Five rows selected, but /data/media/movies holds 812 items, /data/media/old-movies
-    // holds 806, and /elsewhere/movies is not mounted here - none of the three is deletable.
+    // Five rows selected. /data/media/movies and /data/media/old-movies hold libraries, but
+    // holding one is a cost the delete dialog states and offers to bridge, not a reason to
+    // hide the button - so four are deletable. /elsewhere/movies is not mounted here, which
+    // is not a cost but an impossibility, and stays out.
     expect(wrapper.text()).toContain('5 row(s) selected');
-    expect(wrapper.find('[data-testid="bulk-delete-open"]').text()).toContain('Delete (2)');
+    expect(wrapper.find('[data-testid="bulk-delete-open"]').text()).toContain('Delete (4)');
     expect(wrapper.find('[data-testid="prunable-count"]').text()).toContain(
-      '2 of them can be deleted',
+      '4 of them can be deleted',
     );
     expect(wrapper.find('[data-testid="bulk-delete-open"]').attributes('disabled')).toBeUndefined();
   });

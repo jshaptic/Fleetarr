@@ -1,4 +1,5 @@
 import type {
+  FsAssumeResolved,
   FsDirectoriesResponse,
   FsMeasurement,
   PathFilterMode,
@@ -68,8 +69,22 @@ export const storageApi = {
   measure: (path: string) =>
     api.get<FsMeasurement>(`/storage/measure?path=${encodeURIComponent(path)}`),
 
-  /** What would happen if this ran, asked before anything is staged. */
-  preflight: <K extends FsOp>(op: K, payload: QueuePayloadFor<K>) =>
-    api.post<FsPreflight>('/storage/preflight', { op, payload }),
+  /**
+   * What would happen if this ran, asked before anything is staged.
+   *
+   * `assumeResolved` says which *Arr claims the caller is about to stage a fix for, so the
+   * answer is the verdict that will hold once it has. It never reaches the queue: the
+   * executor's own re-run asks with no assumptions at all.
+   */
+  preflight: <K extends FsOp>(
+    op: K,
+    payload: QueuePayloadFor<K>,
+    assumeResolved?: FsAssumeResolved,
+  ) =>
+    api.post<FsPreflight>('/storage/preflight', {
+      op,
+      payload,
+      ...(assumeResolved === undefined ? {} : { assumeResolved }),
+    }),
 
 };

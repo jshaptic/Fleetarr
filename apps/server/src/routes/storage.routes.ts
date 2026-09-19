@@ -75,6 +75,18 @@ const matrixQuery = z.object({
 const preflightBody = z.object({
   op: z.enum(FS_OPS),
   payload: z.unknown(),
+  /**
+   * Claims the caller is about to stage a fix for, so the answer is the verdict that will
+   * hold by the time the delete runs.
+   *
+   * Request-only and never persisted: it is not part of the op's payload, so nothing the
+   * executor re-runs can carry it. That is the point - the pre-execution preflight asks
+   * the same question with no assumptions, and the check either really has been cleared
+   * or it fires for real.
+   */
+  assumeResolved: z
+    .object({ rootFolders: z.boolean().optional(), importLists: z.boolean().optional() })
+    .optional(),
 });
 
 /**
@@ -118,7 +130,7 @@ export const storageRoutes: FastifyPluginAsync = async (app) => {
     const body = preflightBody.parse(request.body);
     const op: FsOp = body.op;
     const payload = queuePayloadSchemas[op].parse(body.payload);
-    return app.ctx.filesystem.preflight(op, payload);
+    return app.ctx.filesystem.preflight(op, payload, body.assumeResolved ?? {});
   });
 
   /**

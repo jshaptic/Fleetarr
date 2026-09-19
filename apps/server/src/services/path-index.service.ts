@@ -1,4 +1,10 @@
-import type { ArrImportList, ArrRootFolder, InstanceKind, PathImportList } from '@fleetarr/shared';
+import type {
+  ArrImportList,
+  ArrRootFolder,
+  FsPathReference,
+  InstanceKind,
+  PathImportList,
+} from '@fleetarr/shared';
 import type { InstancesRepository } from '../repositories/instances.repo.js';
 import type { ResourcesService } from './resources.service.js';
 
@@ -46,6 +52,17 @@ export interface InstancePathIndex {
    * from a map would mean walking the map anyway.
    */
   readonly importLists: readonly PathImportList[];
+  /**
+   * Whether `importLists` is an answer or merely an absence.
+   *
+   * A live build always fetches them, so it is true there. The cache-only build does not
+   * make a missing snapshot fatal the way it does for media and root folders - that would
+   * silence the relocation warning every time one expired - so it records the miss here
+   * instead, and `referencedBy` folds it into `complete`. Without this an uncached
+   * instance would report "no list adds here" with full confidence, which is the
+   * unknown-as-cleared failure this whole file is written to prevent.
+   */
+  readonly importListsKnown: boolean;
   /** Parent -> child paths this instance believes in - media paths and root folders. */
   readonly childrenByParent: ReadonlyMap<string, ReadonlySet<string>>;
   /** Sorted, for the inside/outside test. */
@@ -54,6 +71,14 @@ export interface InstancePathIndex {
 
 /** The answer a safety guard gets, including whether it could be trusted. */
 export interface PathReferences {
+  /**
+   * Per instance, every claim it has on the path - required, never optional.
+   *
+   * An optional field defaulting to `[]` would read as "no root folders, no lists" to a
+   * caller that forgot it, and a destructive guard must never mistake a gap for a clear.
+   */
+  readonly instances: readonly FsPathReference[];
+  /** Any instance with any claim at all. The flat answer the relocation warning wants. */
   readonly instanceIds: readonly number[];
   /** False when at least one enabled instance had nothing cached to check against. */
   readonly complete: boolean;
@@ -144,15 +169,38 @@ export class PathIndexService {
 
     const usable = indexes.filter((index) => index.reachable);
 
+    const instances = usable
+      .map((index): FsPathReference => {
+        // At or *under*: deleting a parent takes every root folder below it, so each one
+        // is named with its id - that is what a staged unassign needs, and what
+        // `PathNode.owners` cannot give (a `containsRoot` owner has a null rootFolderId).
+        const rootFolders = index.rootFolderPrefixes
+          .filter((prefix) => isAtOrUnder(prefix, normalised))
+          .sort((a, b) => a.length - b.length || a.localeCompare(b))
+          .map((path) => ({ id: index.rootFolders.get(path)?.id ?? 0, path }));
+
+        return {
+          instanceId: index.instanceId,
+          instanceName: index.name,
+          rootFolders,
+          mediaUnder: index.mediaUnder.get(normalised) ?? 0,
+          importLists: index.importLists.filter((list) => isAtOrUnder(list.path, normalised)),
+        };
+      })
+      .filter(
+        (reference) =>
+          reference.rootFolders.length > 0 ||
+          reference.mediaUnder > 0 ||
+          reference.importLists.length > 0,
+      );
+
     return {
-      instanceIds: usable
-        .filter(
-          (index) =>
-            index.rootFolderPrefixes.some((prefix) => isAtOrUnder(prefix, normalised)) ||
-            (index.mediaUnder.get(normalised) ?? 0) > 0,
-        )
-        .map((index) => index.instanceId),
-      complete: usable.length === enabled.length,
+      instances,
+      instanceIds: instances.map((reference) => reference.instanceId),
+      // An instance whose import lists were never cached is checked for everything else
+      // and unknown for this one, which is still an unknown: it cannot clear the path.
+      complete:
+        usable.length === enabled.length && usable.every((index) => index.importListsKnown),
     };
   };
 
@@ -168,14 +216,18 @@ export class PathIndexService {
         const media = this.deps.resources.peekMediaLibrary(instance.id);
         const rootFolders = this.deps.resources.peekRootFolders(instance.id);
         // A cache miss contributes nothing rather than becoming a request. Import lists
-        // are the exception: no guard reads them, so a miss there costs a card some
-        // detail rather than making the whole instance uncheckable.
+        // are the softer case: a guard does read them now, but making a miss fatal would
+        // drop the whole instance out of the relocation warning every time that one
+        // snapshot expired - so the miss is recorded as `importListsKnown: false` and
+        // reaches the guard as incompleteness instead.
         if (media === null || rootFolders === null) continue;
+        const importLists = this.deps.resources.peekImportLists(instance.id);
         indexes.push(
-          buildIndex(instance, rootFolders, media, this.deps.resources.peekImportLists(instance.id) ?? [], {
+          buildIndex(instance, rootFolders, media, importLists ?? [], {
             reachable: true,
             error: null,
             fetchedAt: null,
+            importListsKnown: importLists !== null,
           }),
         );
         continue;
@@ -195,6 +247,7 @@ export class PathIndexService {
             reachable: true,
             error: null,
             fetchedAt: library.fetchedAt,
+            importListsKnown: true,
           }),
         );
       } catch (caught) {
@@ -205,6 +258,8 @@ export class PathIndexService {
             reachable: false,
             error: caught instanceof Error ? caught.message : 'Instance did not answer',
             fetchedAt: null,
+            // Moot: an unreachable instance is never `usable`, so nothing reads this.
+            importListsKnown: false,
           }),
         );
       }
@@ -219,7 +274,12 @@ function buildIndex(
   rootFolders: readonly ArrRootFolder[],
   media: readonly { path: string; title: string; hasFile?: boolean; sizeOnDisk?: number }[],
   importLists: readonly ArrImportList[],
-  status: { reachable: boolean; error: string | null; fetchedAt: string | null },
+  status: {
+    reachable: boolean;
+    error: string | null;
+    fetchedAt: string | null;
+    importListsKnown: boolean;
+  },
 ): InstancePathIndex {
   const rootFolderMap = new Map<string, ArrRootFolder>();
   const mediaAt = new Map<string, string>();
@@ -285,6 +345,7 @@ function buildIndex(
     name: instance.name,
     kind: instance.kind,
     reachable: status.reachable,
+    importListsKnown: status.importListsKnown,
     error: status.error,
     fetchedAt: status.fetchedAt,
     rootFolders: rootFolderMap,

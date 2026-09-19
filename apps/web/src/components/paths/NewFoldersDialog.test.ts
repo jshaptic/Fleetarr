@@ -19,6 +19,7 @@ const preflight = vi.fn(
       measurement: null,
       freeSpace: null,
       referencedBy: [],
+      references: [],
     });
   },
 );

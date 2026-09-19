@@ -1,11 +1,13 @@
 import { mkdir, readdir, rename, rm, rmdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import type {
+  FsAssumeResolved,
   FsCheck,
   FsEntry,
   FsListResponse,
   FsMeasurement,
   FsOp,
+  FsPathReference,
   FsPreflight,
   FsRoot,
   FsRootsResponse,
@@ -103,7 +105,11 @@ function formatBytes(bytes: number): string {
  * because the disk can change between staging and Apply All.
  */
 export class FilesystemService {
-  private references: PathReferenceLookup = async () => ({ instanceIds: [], complete: true });
+  private references: PathReferenceLookup = async () => ({
+    instances: [],
+    instanceIds: [],
+    complete: true,
+  });
   private readonly measurements = new Map<string, { at: number; value: FsMeasurement }>();
 
   constructor(
@@ -369,7 +375,11 @@ export class FilesystemService {
    * What would happen if this ran. Returned to the UI before staging, and re-run by the
    * executor immediately before the operation.
    */
-  async preflight<K extends FsOp>(op: K, payload: QueuePayloadFor<K>): Promise<FsPreflight> {
+  async preflight<K extends FsOp>(
+    op: K,
+    payload: QueuePayloadFor<K>,
+    assumeResolved: FsAssumeResolved = {},
+  ): Promise<FsPreflight> {
     switch (op) {
       case 'fs.mkdir':
         return this.preflightMkdir(payload as QueuePayloadFor<'fs.mkdir'>);
@@ -378,7 +388,7 @@ export class FilesystemService {
       case 'fs.move':
         return this.preflightRelocation('fs.move', payload as QueuePayloadFor<'fs.move'>);
       case 'fs.delete':
-        return this.preflightDelete(payload as QueuePayloadFor<'fs.delete'>);
+        return this.preflightDelete(payload as QueuePayloadFor<'fs.delete'>, assumeResolved);
       default:
         throw new FsError({ code: 'fs_unsupported_op', message: `Unknown filesystem operation ${op}` });
     }
@@ -387,15 +397,21 @@ export class FilesystemService {
   private finish(
     op: FsOp,
     checks: FsCheck[],
-    extra: { measurement?: FsMeasurement | null; freeSpace?: number | null; referencedBy?: readonly number[] } = {},
+    extra: {
+      measurement?: FsMeasurement | null;
+      freeSpace?: number | null;
+      references?: readonly FsPathReference[];
+    } = {},
   ): FsPreflight {
+    const references = extra.references ?? [];
     return {
       op,
       ok: !checks.some((check) => check.status === 'blocker'),
       checks,
       measurement: extra.measurement ?? null,
       freeSpace: extra.freeSpace ?? null,
-      referencedBy: extra.referencedBy ?? [],
+      referencedBy: references.map((reference) => reference.instanceId),
+      references,
     };
   }
 
@@ -519,11 +535,14 @@ export class FilesystemService {
 
     return this.finish(op, checks, {
       freeSpace: await freeSpaceAt(toParentStats.exists ? toParent : from),
-      referencedBy: references.instanceIds,
+      references: references.instances,
     });
   }
 
-  private async preflightDelete(payload: QueuePayloadFor<'fs.delete'>): Promise<FsPreflight> {
+  private async preflightDelete(
+    payload: QueuePayloadFor<'fs.delete'>,
+    assumeResolved: FsAssumeResolved = {},
+  ): Promise<FsPreflight> {
     const target = await this.guard.resolve(payload.path);
     const checks: FsCheck[] = [ok('inside_root', `${target} is inside an allowed storage root`)];
 
@@ -566,38 +585,139 @@ export class FilesystemService {
 
     // A blocker: worth a read to get right.
     const references = await this.references(target, { allowFetch: true });
-    const referencedBy = references.instanceIds;
+    checks.push(...this.referenceChecks(references, payload.force, assumeResolved));
 
-    if (referencedBy.length > 0) {
+    return this.finish('fs.delete', checks, { measurement, references: references.instances });
+  }
+
+  /**
+   * The *Arr side of a delete, as three separate verdicts plus an unknown.
+   *
+   * One check id per reason, because the reasons are not interchangeable. A root folder
+   * and an import list are registrations: staging a `rootFolder.delete` or an
+   * `importList.setEnabled` clears them, which is why each can be waved through with
+   * `assumeResolved` rather than only with `force`. Tracked media is not - unassigning a
+   * root folder leaves every item's stored path exactly where it was - so `media_under`
+   * answers to `force` alone. Collapsing them, as one `referenced_by_arr` did, meant a
+   * folder with a registration and nothing in it was refused in the language of lost
+   * media, and a bridgeable problem looked identical to an unbridgeable one.
+   */
+  private referenceChecks(
+    references: PathReferences,
+    force: boolean,
+    assumeResolved: FsAssumeResolved,
+  ): FsCheck[] {
+    const checks: FsCheck[] = [];
+    // `force` is the user overruling the guard; `assumeResolved` is the dialog promising
+    // to stage the fix in front of the delete. Both downgrade, and both say which it was,
+    // so a queue row never explains itself with the wrong reason.
+    const waive = (id: string, fact: string, remedy: string, resolved: boolean): FsCheck =>
+      resolved
+        ? warning(id, `${fact} - cleared by a staged operation ahead of the delete`)
+        : force
+          ? warning(id, `${fact} - forced`)
+          : blocker(id, `${fact} - ${remedy}, or force the deletion`);
+
+    const rooted = references.instances.filter((reference) => reference.rootFolders.length > 0);
+    if (rooted.length > 0) {
+      const folders = rooted.reduce((sum, reference) => sum + reference.rootFolders.length, 0);
       checks.push(
-        payload.force
-          ? warning(
-              'referenced_by_arr',
-              `${String(referencedBy.length)} connected instance(s) still reference this path - forced`,
-            )
-          : blocker(
-              'referenced_by_arr',
-              `${String(referencedBy.length)} connected instance(s) still have media at this path - remove it there first, or force the deletion`,
-            ),
+        waive(
+          'root_folder_under',
+          `${String(folders)} root folder(s) on ${String(rooted.length)} instance(s) live at or under this path`,
+          'unassign them',
+          assumeResolved.rootFolders === true,
+        ),
       );
-    } else if (!references.complete) {
-      // Fail safe: an unchecked instance is not a cleared one.
+    } else {
+      checks.push(ok('root_folder_under', 'No instance roots at or under this path'));
+    }
+
+    const tracking = references.instances.filter((reference) => reference.mediaUnder > 0);
+    if (tracking.length > 0) {
+      const items = tracking.reduce((sum, reference) => sum + reference.mediaUnder, 0);
+      // Deliberately no `assumeResolved` here: nothing the delete dialog can stage
+      // rewrites a media item's path, so offering to "resolve" this would be a lie.
       checks.push(
-        payload.force
+        force
           ? warning(
-              'referenced_by_arr',
-              'Could not check every instance for media at this path - forced',
+              'media_under',
+              `${String(tracking.length)} instance(s) still track ${String(items)} media item(s) at or under this path - forced`,
             )
           : blocker(
-              'referenced_by_arr',
-              'Fleetarr has no cached view of every instance, so it cannot tell whether one still has media here - refresh the fleet first, or force the deletion',
+              'media_under',
+              `${String(tracking.length)} instance(s) still track ${String(items)} media item(s) at or under this path - move or remove them there first, or force the deletion`,
             ),
       );
     } else {
-      checks.push(ok('referenced_by_arr', 'No connected instance references this path'));
+      checks.push(ok('media_under', 'No instance tracks media at or under this path'));
     }
 
-    return this.finish('fs.delete', checks, { measurement, referencedBy });
+    checks.push(this.importListCheck(references, assumeResolved, waive));
+
+    if (!references.complete) {
+      // Fail safe: an unchecked instance is not a cleared one. No `assumeResolved` - a
+      // promise to clear what you could not see is worth nothing.
+      checks.push(
+        force
+          ? warning('references_unknown', 'Could not check every instance for this path - forced')
+          : blocker(
+              'references_unknown',
+              'Fleetarr has no complete view of the fleet, so it cannot tell whether an instance still claims this path - refresh the fleet first, or force the deletion',
+            ),
+      );
+    } else {
+      checks.push(ok('references_unknown', 'Every enabled instance answered'));
+    }
+
+    return checks;
+  }
+
+  /**
+   * An import list is graded by what it does unattended, not by its mere existence.
+   *
+   * A list that adds automatically is the one that recreates the folder on its next sync,
+   * so it refuses. An enabled manual list only offers the path - worth saying, not worth
+   * refusing over. A disabled list changes nothing on its own and is not a finding at all.
+   */
+  private importListCheck(
+    references: PathReferences,
+    assumeResolved: FsAssumeResolved,
+    waive: (id: string, fact: string, remedy: string, resolved: boolean) => FsCheck,
+  ): FsCheck {
+    const lists = references.instances.flatMap((reference) => reference.importLists);
+    const enabled = lists.filter((list) => list.enabled);
+    const automatic = enabled.filter((list) => list.automatic);
+
+    // The bridge disables every enabled list, not only the automatic ones, so it clears
+    // the warning below along with the blocker above - one checkbox, one verdict.
+    if (assumeResolved.importLists === true && enabled.length > 0) {
+      return warning(
+        'import_list_under',
+        `${String(enabled.length)} enabled import list(s) target this path - cleared by a staged operation ahead of the delete`,
+      );
+    }
+    if (automatic.length > 0) {
+      return waive(
+        'import_list_under',
+        `${String(automatic.length)} enabled import list(s) add here automatically and will recreate this folder`,
+        'disable them',
+        false,
+      );
+    }
+    if (enabled.length > 0) {
+      return warning(
+        'import_list_under',
+        `${String(enabled.length)} enabled import list(s) target this path - nothing refills it unattended, but the list is left aimed at a folder that is gone`,
+      );
+    }
+    if (lists.length > 0) {
+      return ok(
+        'import_list_under',
+        `${String(lists.length)} import list(s) target this path, all disabled`,
+      );
+    }
+    return ok('import_list_under', 'No import list adds media at or under this path');
   }
 
   private sourceChecks(target: string, stats: PathStats): FsCheck[] {
@@ -711,7 +831,13 @@ function blockerCode(checkId: string): string {
       return 'fs_exists';
     case 'recursive_required':
       return 'fs_not_empty';
+    // One code for all four: the split exists so the *message* names the reason, but the
+    // HTTP contract stays as it was - nothing in the web app branches on this code.
     case 'referenced_by_arr':
+    case 'root_folder_under':
+    case 'media_under':
+    case 'import_list_under':
+    case 'references_unknown':
       return 'fs_referenced_by_arr';
     case 'not_symlink':
       return 'fs_is_symlink';

@@ -60,6 +60,8 @@ function serviceFor(
     importLists?: readonly ArrImportList[];
     fails?: boolean;
     cached?: boolean;
+    /** Cached separately: media can be in the snapshot cache while the lists are not. */
+    listsCached?: boolean;
   }>,
 ): { service: PathIndexService; fetches: () => number } {
   let fetches = 0;
@@ -97,11 +99,12 @@ function serviceFor(
       const entry = find(id);
       return entry?.cached === false ? null : (entry?.rootFolders ?? []);
     },
-    // Deliberately null on a cache miss *and* harmless: no guard reads import lists, so
-    // the index must still build without them.
+    // Null on a miss, and the index must still build - but a guard reads import lists now,
+    // so the miss has to travel with the answer rather than look like an empty list.
     peekImportLists: (id: number) => {
       const entry = find(id);
-      return entry?.cached === false ? null : (entry?.importLists ?? []);
+      if (entry?.cached === false || entry?.listsCached === false) return null;
+      return entry?.importLists ?? [];
     },
   } as unknown as ResourcesService;
 
@@ -321,6 +324,60 @@ describe('PathIndexService', () => {
 
       assert.deepEqual((await service.referencedBy('/data/movies-4k')).instanceIds, []);
       assert.deepEqual((await service.referencedBy('/data/mov')).instanceIds, []);
+    });
+
+    test('names each claim, so a caller can tell a registration from a library', async () => {
+      const { service } = serviceFor([
+        {
+          instance: instance(),
+          rootFolders: [rootFolder('/data/media/movies', 4)],
+          media: [media(1, '/data/media/movies/Dune (2021)')],
+          importLists: [importList(9, '/data/media/movies')],
+        },
+      ]);
+
+      const answer = await service.referencedBy('/data/media/movies', { allowFetch: true });
+
+      assert.deepEqual(answer.instances[0]?.rootFolders, [{ id: 4, path: '/data/media/movies' }]);
+      assert.equal(answer.instances[0]?.mediaUnder, 1);
+      assert.equal(answer.instances[0]?.importLists[0]?.id, 9);
+      assert.equal(answer.instances[0]?.instanceName, 'Radarr');
+    });
+
+    test('a list filling the folder is a reference, even with no root folder and no media', async () => {
+      // The hole this closes: nothing rooted here and nothing downloaded, so the old guard
+      // called it unreferenced - and the list recreated the folder on its next sync.
+      const { service } = serviceFor([
+        {
+          instance: instance(),
+          rootFolders: [],
+          media: [],
+          importLists: [importList(9, '/data/media/incoming')],
+        },
+      ]);
+
+      const answer = await service.referencedBy('/data/media/incoming', { allowFetch: true });
+
+      assert.deepEqual(answer.instanceIds, [1]);
+      assert.equal(answer.instances[0]?.mediaUnder, 0);
+      assert.deepEqual(answer.instances[0]?.rootFolders, []);
+    });
+
+    test('import lists it could not read make the answer incomplete, not empty', async () => {
+      const { service } = serviceFor([
+        {
+          instance: instance(),
+          rootFolders: [rootFolder('/data/media')],
+          media: [media(1, '/data/media/A')],
+          importLists: [importList(9, '/data/media')],
+          listsCached: false,
+        },
+      ]);
+
+      // Media and root folders are cached, so the instance is checkable for those - but an
+      // uncached list must never come back looking like "no list adds here".
+      const answer = await service.referencedBy('/data/media');
+      assert.equal(answer.complete, false);
     });
 
     test('never turns a cache miss into a request', async () => {

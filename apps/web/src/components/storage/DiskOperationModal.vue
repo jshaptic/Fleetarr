@@ -7,6 +7,14 @@ import { resourcesApi } from '@/api/resources';
 import { basename, joinPath, parentOf, rewritePathPrefix } from '@/lib/fs-tree';
 import { formatBytes } from '@/lib/format';
 import { type AlignTarget } from '@/lib/path-matrix';
+import {
+  assumeResolved,
+  disableListTargets,
+  needsForce as forceStillNeeded,
+  needsImportListBridge,
+  needsRootFolderBridge,
+  unassignTargets,
+} from '@/lib/delete-bridge';
 import { usePathsStore } from '@/stores/paths';
 import { useQueueStore } from '@/stores/queue';
 import IconCheck from '@/components/base/icons/IconCheck.vue';
@@ -68,6 +76,9 @@ const name = ref(basename(props.target));
 const destination = ref(props.operation === 'move' ? (parentOf(props.target) ?? '') : '');
 const recursive = ref(false);
 const force = ref(false);
+/** Clear the *Arr registrations in front of the delete, rather than forcing past them. */
+const bridgeRoots = ref(false);
+const bridgeLists = ref(false);
 const confirmation = ref('');
 
 const preflight = ref<FsPreflight | null>(null);
@@ -132,19 +143,36 @@ const needsRecursive = computed(
     ) ?? false,
 );
 
-const needsForce = computed(
-  () =>
-    preflight.value?.checks.some(
-      (check) => check.id === 'referenced_by_arr' && check.status !== 'ok',
-    ) ?? false,
-);
+/**
+ * The three *Arr questions, each read off its own check.
+ *
+ * The first two name a registration the queue can clear, so they are offers; the third is
+ * what is left when nothing can be. Ticking an offer re-runs the preflight with
+ * `assumeResolved`, and if that was the only thing standing in the way the force checkbox
+ * disappears - on the server's word, not on this component's arithmetic.
+ *
+ * Stable under their own checkbox, like `needsRecursive`: `force` and `assumeResolved` both
+ * downgrade a blocker to a warning rather than to `ok`, so none of them can flicker as the
+ * re-run verdict comes back.
+ */
+const canUnassign = computed(() => needsRootFolderBridge(preflight.value));
+const canDisableLists = computed(() => needsImportListBridge(preflight.value));
+const needsForce = computed(() => forceStillNeeded(preflight.value));
+
+const unassign = computed(() => unassignTargets(preflight.value));
+const disableLists = computed(() => disableListTargets(preflight.value));
 
 // A hidden option must not keep a `true` in the payload it no longer explains. Guarded so the
 // write cannot re-trigger the watch that produced the verdict in the first place.
-watch([needsRecursive, needsForce], ([recursiveNeeded, forceNeeded]) => {
-  if (!recursiveNeeded && recursive.value) recursive.value = false;
-  if (!forceNeeded && force.value) force.value = false;
-});
+watch(
+  [needsRecursive, needsForce, canUnassign, canDisableLists],
+  ([recursiveNeeded, forceNeeded, unassignOffered, listsOffered]) => {
+    if (!recursiveNeeded && recursive.value) recursive.value = false;
+    if (!forceNeeded && force.value) force.value = false;
+    if (!unassignOffered && bridgeRoots.value) bridgeRoots.value = false;
+    if (!listsOffered && bridgeLists.value) bridgeLists.value = false;
+  },
+);
 
 const blockers = computed(() => preflight.value?.checks.filter((check) => check.status === 'blocker') ?? []);
 const warnings = computed(() => preflight.value?.checks.filter((check) => check.status === 'warning') ?? []);
@@ -277,7 +305,13 @@ async function check(): Promise<void> {
 
   checking.value = true;
   try {
-    preflight.value = await fs.preflight(candidate.op as FsOp, candidate.payload);
+    preflight.value = await fs.preflight(
+      candidate.op as FsOp,
+      candidate.payload,
+      candidate.op === 'fs.delete'
+        ? assumeResolved(bridgeRoots.value, bridgeLists.value)
+        : undefined,
+    );
   } catch (error) {
     preflight.value = {
       op: candidate.op,
@@ -292,6 +326,7 @@ async function check(): Promise<void> {
       measurement: null,
       freeSpace: null,
       referencedBy: [],
+      references: [],
     };
   } finally {
     checking.value = false;
@@ -319,6 +354,30 @@ async function stage(): Promise<void> {
         })),
       ),
     });
+  } else if (candidate.op === 'fs.delete') {
+    // Same shape as the rename above: when the *Arr side is being cleared first, the disk
+    // step is the tail of a chain and the store owns the wiring, so a failed unassign can
+    // never be followed by the delete it was meant to make safe.
+    await queue.stageFolderDeletions([
+      {
+        path: candidate.payload.path,
+        recursive: candidate.payload.recursive,
+        force: candidate.payload.force,
+        unassign: bridgeRoots.value
+          ? unassign.value.map((target) => ({
+              instanceId: target.instanceId,
+              rootFolderId: target.rootFolderId,
+              path: target.path,
+            }))
+          : [],
+        disableLists: bridgeLists.value
+          ? disableLists.value.map((target) => ({
+              instanceId: target.instanceId,
+              importListId: target.importListId,
+            }))
+          : [],
+      },
+    ]);
   } else {
     await queue.stageFsOperation(candidate, describeStaging());
   }
@@ -345,7 +404,7 @@ onMounted(() => {
   }
 });
 
-watch([name, destination, recursive, force], () => void check());
+watch([name, destination, recursive, force, bridgeRoots, bridgeLists], () => void check());
 </script>
 
 <template>
@@ -443,12 +502,41 @@ watch([name, destination, recursive, force], () => void check());
             <span class="block text-[11px]">Required for a folder that is not empty.</span>
           </span>
         </label>
+        <!--
+          The two offers come before the override, because they are what makes it
+          unnecessary: each stages the *Arr change in front of the delete, so the guard is
+          satisfied rather than overruled, and ticking one can take the force box away.
+        -->
+        <label v-if="canUnassign" class="flex items-start gap-2 text-xs text-muted">
+          <BaseCheckbox v-model="bridgeRoots" data-testid="delete-unassign" class="mt-0.5" />
+          <span>
+            <span class="font-medium text-ink">
+              Also unassign {{ unassign.length }} root folder(s) first
+            </span>
+            <span class="block text-[11px]">
+              {{ unassign.map((target) => `${target.instanceName} (${target.path})`).join(', ') }}
+            </span>
+          </span>
+        </label>
+        <label v-if="canDisableLists" class="flex items-start gap-2 text-xs text-muted">
+          <BaseCheckbox v-model="bridgeLists" data-testid="delete-disable-lists" class="mt-0.5" />
+          <span>
+            <span class="font-medium text-ink">
+              Also disable {{ disableLists.length }} import list(s) first
+            </span>
+            <span class="block text-[11px]">
+              {{ disableLists.map((target) => `${target.name} on ${target.instanceName}`).join(', ') }}
+              - otherwise the next sync recreates this folder.
+            </span>
+          </span>
+        </label>
         <label v-if="needsForce" class="flex items-start gap-2 text-xs text-muted">
           <BaseCheckbox v-model="force" data-testid="delete-force" tone="danger" class="mt-0.5" />
           <span>
-            <span class="font-medium text-ink">Delete even though an instance still tracks it</span>
+            <span class="font-medium text-ink">Delete anyway</span>
             <span class="block text-[11px]">
-              Leaves that instance pointing at a path that no longer exists.
+              Nothing staged here can fix what is left - see the refusals above. The instance
+              is left pointing at a path that no longer exists.
             </span>
           </span>
         </label>
