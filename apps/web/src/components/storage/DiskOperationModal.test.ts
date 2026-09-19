@@ -330,6 +330,11 @@ describe('DiskOperationModal', () => {
     return document.body.querySelector(`[data-testid="delete-${name}"]`);
   }
 
+  // BaseCheckbox puts fall-through attrs on the real <input>, so the testid *is* the input.
+  function checked(name: 'recursive' | 'force' | 'unassign' | 'disable-lists'): boolean {
+    return (box(name) as HTMLInputElement | null)?.checked ?? false;
+  }
+
   it('asks neither question when the folder is empty and nothing references it', async () => {
     const wrapper = await mountDelete([EMPTY, UNREFERENCED]);
 
@@ -375,6 +380,8 @@ describe('DiskOperationModal', () => {
     );
 
     expect(box('unassign')).not.toBeNull();
+    // On by default: leaving *Arr pointing at a deleted path is nobody's intent.
+    expect(checked('unassign')).toBe(true);
     // The whole point: this refusal is bridgeable, so force is not what it asks for.
     expect(box('force')).toBeNull();
     expect(document.body.textContent).toContain('Radarr-HD');
@@ -391,6 +398,8 @@ describe('DiskOperationModal', () => {
     );
 
     expect(box('disable-lists')).not.toBeNull();
+    // Opt-in, unlike unassigning: this switches off a list the user configured.
+    expect(checked('disable-lists')).toBe(false);
     expect(box('force')).toBeNull();
     expect(document.body.textContent).toContain('Trending');
     wrapper.unmount();
@@ -405,8 +414,9 @@ describe('DiskOperationModal', () => {
       ROOTED_AT,
     );
 
-    box('unassign')?.dispatchEvent(new MouseEvent('click'));
-    for (let tick = 0; tick < 8; tick += 1) await flushPromises();
+    // No click: unassigning is on by default, so the ordinary path through this dialog is
+    // the one that leaves *Arr consistent.
+    expect(checked('unassign')).toBe(true);
 
     // The server said ok once `assumeResolved` was asserted, so staging is allowed.
     const confirm = document.body.querySelector<HTMLInputElement>('input[autocomplete="off"]');

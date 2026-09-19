@@ -205,8 +205,8 @@ describe('BulkDeleteDialog', () => {
     checksByPath['/data/b'] = [EMPTY, UNREFERENCED];
     const wrapper = await mountDialog([node('/data/a'), node('/data/b')]);
 
-    find('bulk-delete-unassign')?.dispatchEvent(new MouseEvent('click'));
-    for (let tick = 0; tick < 8; tick += 1) await flushPromises();
+    // On by default - no click needed. The testid lands on the real <input>.
+    expect((find('bulk-delete-unassign') as HTMLInputElement | null)?.checked).toBe(true);
 
     type('2');
     await flushPromises();

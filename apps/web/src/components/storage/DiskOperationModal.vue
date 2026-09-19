@@ -76,8 +76,20 @@ const name = ref(basename(props.target));
 const destination = ref(props.operation === 'move' ? (parentOf(props.target) ?? '') : '');
 const recursive = ref(false);
 const force = ref(false);
-/** Clear the *Arr registrations in front of the delete, rather than forcing past them. */
-const bridgeRoots = ref(false);
+/**
+ * Clear the *Arr registrations in front of the delete, rather than forcing past them.
+ *
+ * Unassigning starts **on**. A root folder pointing at a path that no longer exists is not
+ * a state anyone wants, and every other way out of this dialog is worse: force it and *Arr
+ * breaks, or cancel and go do it by hand. Disabling an import list stays opt-in, because it
+ * stops a list the user configured rather than cleaning up after one.
+ *
+ * Neither reaches the `fs.delete` payload - they only pick targets out of the preflight's
+ * reference list, which is empty whenever the matching check came back `ok`. So unlike
+ * `recursive` and `force` below, a `true` left behind after the offer disappears selects
+ * nothing, and there is no reset watcher fighting the default.
+ */
+const bridgeRoots = ref(true);
 const bridgeLists = ref(false);
 const confirmation = ref('');
 
@@ -164,15 +176,10 @@ const disableLists = computed(() => disableListTargets(preflight.value));
 
 // A hidden option must not keep a `true` in the payload it no longer explains. Guarded so the
 // write cannot re-trigger the watch that produced the verdict in the first place.
-watch(
-  [needsRecursive, needsForce, canUnassign, canDisableLists],
-  ([recursiveNeeded, forceNeeded, unassignOffered, listsOffered]) => {
-    if (!recursiveNeeded && recursive.value) recursive.value = false;
-    if (!forceNeeded && force.value) force.value = false;
-    if (!unassignOffered && bridgeRoots.value) bridgeRoots.value = false;
-    if (!listsOffered && bridgeLists.value) bridgeLists.value = false;
-  },
-);
+watch([needsRecursive, needsForce], ([recursiveNeeded, forceNeeded]) => {
+  if (!recursiveNeeded && recursive.value) recursive.value = false;
+  if (!forceNeeded && force.value) force.value = false;
+});
 
 const blockers = computed(() => preflight.value?.checks.filter((check) => check.status === 'blocker') ?? []);
 const warnings = computed(() => preflight.value?.checks.filter((check) => check.status === 'warning') ?? []);

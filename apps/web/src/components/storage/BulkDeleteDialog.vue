@@ -47,8 +47,17 @@ const queue = useQueueStore();
 
 const recursive = ref(false);
 const force = ref(false);
-/** Batch-wide, like the two above: one answer for the selection, applied per folder. */
-const bridgeRoots = ref(false);
+/**
+ * Batch-wide, like the two above: one answer for the selection, applied per folder.
+ *
+ * Unassigning starts **on** for the same reason it does in the single-folder dialog - a root
+ * folder aimed at a deleted path helps nobody - and a folder in the batch with no root
+ * folder of its own simply contributes no unassign. Disabling a list stays opt-in.
+ *
+ * Neither reaches an `fs.delete` payload; they only pick targets out of each folder's own
+ * preflight, so a `true` that outlives its offer selects nothing and needs no reset.
+ */
+const bridgeRoots = ref(true);
 const bridgeLists = ref(false);
 const typed = ref('');
 
@@ -228,15 +237,10 @@ async function confirm(): Promise<void> {
 onMounted(() => void check());
 
 // A hidden option must not leave a `true` in the payload it no longer explains.
-watch(
-  [needsRecursive, needsForce, canUnassign, canDisableLists],
-  ([recursiveNeeded, forceNeeded, unassignOffered, listsOffered]) => {
-    if (!recursiveNeeded && recursive.value) recursive.value = false;
-    if (!forceNeeded && force.value) force.value = false;
-    if (!unassignOffered && bridgeRoots.value) bridgeRoots.value = false;
-    if (!listsOffered && bridgeLists.value) bridgeLists.value = false;
-  },
-);
+watch([needsRecursive, needsForce], ([recursiveNeeded, forceNeeded]) => {
+  if (!recursiveNeeded && recursive.value) recursive.value = false;
+  if (!forceNeeded && force.value) force.value = false;
+});
 
 watch([recursive, force, bridgeRoots, bridgeLists], () => void check());
 </script>
