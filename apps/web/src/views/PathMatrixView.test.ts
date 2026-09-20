@@ -71,6 +71,8 @@ function owner(instanceId: number, use: PathUse, overrides: Partial<PathOwner> =
     title: use === 'tracked' ? 'Dune' : null,
     rootFoldersUnder: use === 'containsRoot' ? [{ id: 1, path: '/data/media/movies' }] : [],
     importLists: [],
+    collections: [],
+    collectionsKnown: true,
     freeSpace: use === 'rootFolder' ? 1_000_000_000 : null,
     totalSpace: use === 'rootFolder' ? 4_000_000_000 : null,
     ...overrides,
@@ -360,6 +362,7 @@ vi.mock('@/api/resources', () => ({
         })),
         importLists: [],
         qualityProfiles: [],
+        collections: [],
       }),
     media: vi.fn(),
     allMediaIdsInRootFolder: (instanceId: number) =>

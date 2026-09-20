@@ -57,6 +57,7 @@ function snapshot(
     rootFolders: [],
     importLists: parts.importLists ?? [],
     qualityProfiles: parts.qualityProfiles ?? [],
+    collections: [],
   };
 }
 

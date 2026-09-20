@@ -256,5 +256,34 @@ describe('the media fleet view', () => {
       [...response.body.vocabulary.instances].sort(),
       ['Radarr-4K', 'Radarr-HD', 'Sonarr-TV'],
     );
+    // Built from the library, not from /collection - so it still answers on a Radarr too
+    // old to have that endpoint.
+    assert.deepEqual(response.body.vocabulary.collections, ['Dune Collection']);
+  });
+
+  test('a collection is a column and a filter, and a series has none rather than unknown', async () => {
+    const all = await media('/media');
+    const dune = all.body.rows.find((row) => row.title === 'Dune');
+    const shogun = all.body.rows.find((row) => row.kind === 'series');
+
+    assert.equal(dune?.collection, 'Dune Collection');
+    // Not null-because-we-could-not-ask: Sonarr has no collections as a matter of fact.
+    assert.equal(shogun?.collection, null);
+
+    const filtered = await media('/media?q=collection%3A%22Dune%20Collection%22');
+    assert.deepEqual(
+      filtered.body.rows.map((row) => row.title),
+      ['Dune'],
+    );
+    assert.equal(filtered.body.counts.undecided, 0, 'a series is a plain no, never undecided');
+
+    const none = await media('/media?q=collection%3Anone');
+    // Every series matches - a known absence, not an unknown - and so does any film in no
+    // collection. The film that is in one does not. Note the fleet holds a Sonarr series
+    // also called Dune: identity is kind-first, so it is a different row and it matches.
+    assert.ok(none.body.rows.every((row) => row.collection === null));
+    assert.ok(none.body.rows.some((row) => row.kind === 'series'));
+    assert.ok(!none.body.rows.some((row) => row.kind === 'movie' && row.title === 'Dune'));
+    assert.equal(none.body.counts.undecided, 0);
   });
 });

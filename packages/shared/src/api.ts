@@ -1,4 +1,4 @@
-import type { ArrImportList, ArrMedia, ArrQualityProfile, ArrRootFolder, ArrTagDetail } from './arr.js';
+import type { ArrCollection, ArrImportList, ArrMedia, ArrQualityProfile, ArrRootFolder, ArrTagDetail } from './arr.js';
 import type { ConnectionTestResult, Instance } from './instance.js';
 import type { NewQueueItem, QueueItem, QueueItemStatus } from './queue.js';
 import type { OnErrorPolicy, QueueEvent, QueueRun } from './run.js';
@@ -37,6 +37,15 @@ export interface ResourceSnapshotResponse {
   readonly rootFolders: readonly ArrRootFolder[];
   readonly importLists: readonly ArrImportList[];
   readonly qualityProfiles: readonly ArrQualityProfile[];
+  /**
+   * Radarr collections. **`null` is unknown, `[]` is genuinely none.**
+   *
+   * Null on every Sonarr instance would be wrong - Sonarr has no collections, which is an
+   * answer. Null is for a Radarr too old to expose `/collection` and for a read that
+   * failed, so a caller counting tag usage never reports "nothing uses this tag" on
+   * behalf of an instance it could not ask.
+   */
+  readonly collections: readonly ArrCollection[] | null;
 }
 
 export interface QueueListResponse {

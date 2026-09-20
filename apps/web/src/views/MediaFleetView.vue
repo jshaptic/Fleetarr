@@ -281,7 +281,16 @@ onMounted(() => {
                   </label>
                 </th>
                 <th
-                  v-for="header in ['Kind', 'Links', 'Instances', 'Size', 'Status', 'Tags', 'Root folder']"
+                  v-for="header in [
+                    'Kind',
+                    'Links',
+                    'Instances',
+                    'Size',
+                    'Status',
+                    'Tags',
+                    'Collection',
+                    'Root folder',
+                  ]"
                   :key="header"
                   scope="col"
                   class="border-b border-l border-line bg-raised px-3 py-2 text-left text-[11px] font-semibold text-muted whitespace-nowrap"
@@ -402,6 +411,34 @@ onMounted(() => {
                       {{ tag }}
                     </button>
                   </span>
+                </td>
+
+                <td class="border-b border-l border-line px-2 py-1.5">
+                  <!--
+                    A row-scope value: the collection comes from TMDB, so every copy of the
+                    film agrees on it. A series has none ever, which is why the dash filters
+                    by `collection:none` rather than reading as "we did not ask".
+                  -->
+                  <button
+                    v-if="row.collection === null"
+                    type="button"
+                    data-collection="none"
+                    class="text-faint transition-colors hover:text-accent"
+                    title="Filter by collection:none"
+                    @click="filterByNone('collection')"
+                  >
+                    —
+                  </button>
+                  <button
+                    v-else
+                    type="button"
+                    data-collection
+                    class="block max-w-[14rem] truncate text-left text-[11px] text-muted transition-colors hover:text-accent"
+                    :title="`Filter by ${row.collection}`"
+                    @click="filterEquals('collection', row.collection)"
+                  >
+                    {{ row.collection }}
+                  </button>
                 </td>
 
                 <td class="border-b border-l border-line px-2 py-1.5">

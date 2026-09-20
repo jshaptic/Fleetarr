@@ -151,7 +151,7 @@ describe('StagingDrawer', () => {
         payload: { mediaIds: [1], toRootFolderPath: '/data/4k', moveFiles: true },
         summary: 'Move 1 item(s) to /data/4k (moving files on disk)',
       }),
-      item(2, 2, { op: 'tag.delete', payload: { tagId: 4, label: 'old', detachFromMedia: true } }),
+      item(2, 2, { op: 'tag.delete', payload: { tagId: 4, label: 'old', detachFromMedia: true, detachFromCollections: true } }),
     );
 
     const wrapper = mount(StagingDrawer, { global: { plugins: [createPinia()] } });

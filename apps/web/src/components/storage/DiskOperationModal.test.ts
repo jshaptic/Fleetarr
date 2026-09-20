@@ -160,6 +160,8 @@ const RADARR_4K = {
   name: 'Radarr-4K',
   kind: 'radarr' as const,
   roots: [{ path: ROOT, rootFolderId: 5 }],
+  collections: [],
+  collectionsKnown: true,
 };
 
 async function mountDialog(
@@ -541,6 +543,8 @@ describe('DiskOperationModal', () => {
             { path: `${from}/auto-feed/0k`, rootFolderId: 8 },
             { path: `${from}/curated-feed/0k`, rootFolderId: 9 },
           ],
+          collections: [],
+          collectionsKnown: true,
         },
       ],
     });

@@ -87,6 +87,35 @@ export const arrImportListSchema = z.object({
 export type ArrImportList = z.infer<typeof arrImportListSchema>;
 
 /**
+ * A Radarr collection - a TMDB collection Radarr tracks in its own right.
+ *
+ * **Radarr only**, and the API offers no create and no delete: collections arrive from
+ * TMDB, so every write is a PUT on one that already exists.
+ *
+ * It is here because a collection is two things Fleetarr already manages at once - a root
+ * folder consumer (`rootFolderPath`) and a tag holder (`tags`) - which makes it a folder's
+ * owner and a tag's user. Ignoring it meant a folder only a collection roots at read as
+ * untracked, and a tag only collections carry read as unused.
+ *
+ * `movies[]` is deliberately absent: it is the wide part of the body, and the join back to
+ * the library is by `tmdbId` anyway.
+ */
+export const arrCollectionSchema = z.object({
+  id: z.number().int(),
+  title: z.string(),
+  sortTitle: z.string().optional(),
+  tmdbId: z.number().int().optional(),
+  monitored: z.boolean().default(false),
+  /** Radarr searches for the collection's films as soon as one is added. */
+  searchOnAdd: z.boolean().optional(),
+  qualityProfileId: z.number().int().default(0),
+  minimumAvailability: z.string().optional(),
+  rootFolderPath: z.string().default(''),
+  tags: z.array(z.number().int()).default([]),
+});
+export type ArrCollection = z.infer<typeof arrCollectionSchema>;
+
+/**
  * Sonarr's per-series rollup. Narrow on purpose: it is here because Sonarr has no
  * top-level `sizeOnDisk` and no `hasFile`, so without it "how big is this" and "is
  * anything on disk" are unanswerable for every series - and an unanswerable question
@@ -100,15 +129,26 @@ export const arrMediaStatisticsSchema = z.object({
 });
 export type ArrMediaStatistics = z.infer<typeof arrMediaStatisticsSchema>;
 
+/** What `/movie` says about a film's collection, inline. The full record is `arrCollectionSchema`. */
+export const arrMediaCollectionSchema = z.object({
+  title: z.string().optional(),
+  tmdbId: z.number().int().optional(),
+});
+export type ArrMediaCollection = z.infer<typeof arrMediaCollectionSchema>;
+
 /**
  * Projection of a movie/series row for the bulk-selection grid.
  *
  * Every field here is rendered, sorted or filtered on by `/media`; the rule is never to
  * widen this to "be complete". Deliberately absent, and why: `images`/`remotePoster`
  * (stripped at fetch time by MEDIA_LIGHT_QUERY anyway), `overview`, `ratings`,
- * `popularity`, `alternateTitles`, `cleanTitle`, `collection`, `movieFile`, `seasons`,
+ * `popularity`, `alternateTitles`, `cleanTitle`, `movieFile`, `seasons`,
  * `folder`, `originalLanguage` (an object nothing renders), `ended` (Sonarr's `status`
  * already says it), and the release-date family.
+ *
+ * `collection` used to be on that list and no longer is: `/media` renders it as a column
+ * and filters on it, which is the bar this projection sets. Only the two keys that answer
+ * "which collection" are taken - never the nested movie list.
  */
 export const arrMediaSchema = z.object({
   id: z.number().int(),
@@ -150,6 +190,11 @@ export const arrMediaSchema = z.object({
   seriesType: z.string().optional(),
   /** radarr only */
   minimumAvailability: z.string().optional(),
+  /**
+   * The TMDB collection this film belongs to. Radarr only - a series has none, *ever*,
+   * which is why `/media` reads it as a known absence rather than as unknown.
+   */
+  collection: arrMediaCollectionSchema.optional(),
   movieFileId: z.number().int().optional(),
   statistics: arrMediaStatisticsSchema.optional(),
 });

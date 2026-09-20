@@ -1,10 +1,12 @@
 import {
+  arrCollectionSchema,
   arrImportListMovieSchema,
   arrImportListSchema,
   arrMediaSchema,
   arrQualityProfileSchema,
   arrRootFolderSchema,
   arrTagDetailSchema,
+  type ArrCollection,
   type ArrImportList,
   type ArrImportListMovie,
   type ArrJson,
@@ -19,7 +21,8 @@ import {
 import { ArrClient, pageMedia, type MediaQuery } from '../arr/client.js';
 import type { ArrDispatcherPool } from '../arr/http.js';
 import type { InstancesRepository } from '../repositories/instances.repo.js';
-import { ValidationError } from '../lib/errors.js';
+import { nowIso } from '../db/mappers.js';
+import { ArrApiError, ValidationError } from '../lib/errors.js';
 import type { SnapshotResource, SnapshotsRepository } from '../repositories/snapshots.repo.js';
 
 /**
@@ -41,6 +44,17 @@ interface CachedFetch<T> {
   readonly payload: readonly T[];
   readonly fetchedAt: string;
 }
+
+/**
+ * A read that is allowed to come back unanswerable.
+ *
+ * Only collections need this so far: Radarr gained `/collection` in v4, so an older one
+ * answers 404, and that is "we cannot tell" rather than "there are none". Every caller has
+ * to carry the distinction, which is why it is a union rather than an empty array.
+ */
+export type KnownCollections =
+  | { readonly known: true; readonly items: readonly ArrCollection[]; readonly fetchedAt: string }
+  | { readonly known: false; readonly reason: string };
 
 /**
  * Reads *Arr resources through the snapshot cache.
@@ -78,7 +92,7 @@ export class ResourcesService {
   async getResources(instanceId: number, refresh = false): Promise<ResourceSnapshotResponse> {
     const instance = this.deps.instances.requireWithKey(instanceId);
 
-    const [tags, rootFolders, importLists, qualityProfiles] = await Promise.all([
+    const [tags, rootFolders, importLists, qualityProfiles, collections] = await Promise.all([
       this.cached<ArrTagDetail>(
         instance,
         'tagDetail',
@@ -107,6 +121,7 @@ export class ResourcesService {
         async (client) => (await client.listQualityProfiles()).map((entry) => entry.raw),
         (raw) => arrQualityProfileSchema.parse(raw),
       ),
+      this.collections(instanceId, refresh),
     ]);
 
     // The oldest of the four is the honest "as of" for the whole view.
@@ -122,6 +137,9 @@ export class ResourcesService {
       rootFolders: rootFolders.payload,
       importLists: importLists.payload,
       qualityProfiles: qualityProfiles.payload,
+      // Null, not [], when this Radarr cannot answer - and never a thrown 404 taking the
+      // whole snapshot with it, which is why `collections` swallows exactly that one code.
+      collections: collections.known ? collections.items : null,
     };
   }
 
@@ -223,6 +241,55 @@ export class ResourcesService {
       (raw) => arrImportListSchema.parse(raw),
     );
     return lists.payload;
+  }
+
+  /**
+   * Radarr's collections, or a stated reason they could not be read.
+   *
+   * Sonarr is answered without a request: it has no collections, and that is a fact about
+   * the app, so it is `known` with an empty list rather than an unknown. A Radarr that
+   * 404s `/collection` predates the endpoint and is `known: false`.
+   *
+   * **Only `arr_not_found` is caught.** A timeout, a 401 or an unreachable host must keep
+   * propagating, or an instance that is simply down would come back as a reachable one
+   * with no collections - which is the exact failure the known/unknown split exists to
+   * prevent. The 404 verdict is deliberately not cached: it is one cheap request, the
+   * callers memoise above this layer, and a sentinel in the snapshot table would be
+   * indistinguishable from an empty fleet on the next `peek`.
+   */
+  async collections(instanceId: number, refresh = false): Promise<KnownCollections> {
+    const instance = this.deps.instances.requireWithKey(instanceId);
+    if (instance.kind !== 'radarr') {
+      return { known: true, items: [], fetchedAt: nowIso() };
+    }
+    try {
+      const collections = await this.cached<ArrCollection>(
+        instance,
+        'collection',
+        refresh,
+        async (client) => (await client.listCollections()).map((entry) => entry.raw),
+        (raw) => arrCollectionSchema.parse(raw),
+      );
+      return { known: true, items: collections.payload, fetchedAt: collections.fetchedAt };
+    } catch (error) {
+      if (error instanceof ArrApiError && error.code === 'arr_not_found') {
+        return { known: false, reason: `${instance.name} has no collections endpoint` };
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Cached collections only - null is unknown.
+   *
+   * Sonarr answers `[]` here too, for the same reason `collections()` does: the guards
+   * read this to decide whether the fleet's view is complete, and a Sonarr reported as
+   * unknown would block every folder delete in the app.
+   */
+  peekCollections(instanceId: number): readonly ArrCollection[] | null {
+    const instance = this.deps.instances.requireWithKey(instanceId);
+    if (instance.kind !== 'radarr') return [];
+    return this.peek(instanceId, 'collection', (raw) => arrCollectionSchema.parse(raw));
   }
 
   /** Cached tag details only - `/media` joins per-instance tag ids to their labels. */

@@ -1,8 +1,10 @@
 import type {
+  ArrCollection,
   ArrImportList,
   ArrRootFolder,
   FsPathReference,
   InstanceKind,
+  PathCollection,
   PathImportList,
 } from '@fleetarr/shared';
 import type { InstancesRepository } from '../repositories/instances.repo.js';
@@ -63,6 +65,20 @@ export interface InstancePathIndex {
    * unknown-as-cleared failure this whole file is written to prevent.
    */
   readonly importListsKnown: boolean;
+  /**
+   * Every Radarr collection, each carrying the root folder it adds to. Flat, for the same
+   * prefix-scan reason `importLists` is. Always empty on a Sonarr instance.
+   */
+  readonly collections: readonly PathCollection[];
+  /**
+   * Whether `collections` is an answer or merely an absence.
+   *
+   * **True for Sonarr**, which has no collections to be ignorant of - vacuously known, and
+   * load-bearing: `false` there would make `complete` false for every fleet containing a
+   * Sonarr and block every folder delete in the app. False only for a Radarr that predates
+   * `/collection` or whose snapshot was never cached.
+   */
+  readonly collectionsKnown: boolean;
   /** Parent -> child paths this instance believes in - media paths and root folders. */
   readonly childrenByParent: ReadonlyMap<string, ReadonlySet<string>>;
   /** Sorted, for the inside/outside test. */
@@ -185,13 +201,18 @@ export class PathIndexService {
           rootFolders,
           mediaUnder: index.mediaUnder.get(normalised) ?? 0,
           importLists: index.importLists.filter((list) => isAtOrUnder(list.path, normalised)),
+          collections: index.collections.filter((entry) => isAtOrUnder(entry.path, normalised)),
         };
       })
       .filter(
         (reference) =>
           reference.rootFolders.length > 0 ||
           reference.mediaUnder > 0 ||
-          reference.importLists.length > 0,
+          reference.importLists.length > 0 ||
+          // Without this an instance whose only claim is a collection is dropped here and
+          // `collection_under` then counts nothing - a folder a collection refills would
+          // pass the guard clean.
+          reference.collections.length > 0,
       );
 
     return {
@@ -200,7 +221,8 @@ export class PathIndexService {
       // An instance whose import lists were never cached is checked for everything else
       // and unknown for this one, which is still an unknown: it cannot clear the path.
       complete:
-        usable.length === enabled.length && usable.every((index) => index.importListsKnown),
+        usable.length === enabled.length &&
+        usable.every((index) => index.importListsKnown && index.collectionsKnown),
     };
   };
 
@@ -222,12 +244,15 @@ export class PathIndexService {
         // reaches the guard as incompleteness instead.
         if (media === null || rootFolders === null) continue;
         const importLists = this.deps.resources.peekImportLists(instance.id);
+        // Sonarr answers `[]` here without a snapshot, so this is `known` for it.
+        const collections = this.deps.resources.peekCollections(instance.id);
         indexes.push(
-          buildIndex(instance, rootFolders, media, importLists ?? [], {
+          buildIndex(instance, rootFolders, media, importLists ?? [], collections ?? [], {
             reachable: true,
             error: null,
             fetchedAt: null,
             importListsKnown: importLists !== null,
+            collectionsKnown: collections !== null,
           }),
         );
         continue;
@@ -237,29 +262,42 @@ export class PathIndexService {
         // Three cached reads, not two. Import lists are a handful of rows behind the same
         // snapshot cache as the root folders, and they answer the question a root folder
         // alone cannot: what keeps putting media in this folder.
-        const [library, rootFolders, importLists] = await Promise.all([
+        const [library, rootFolders, importLists, collections] = await Promise.all([
           this.deps.resources.mediaLibrary(instance.id, options.refresh === true),
           this.deps.resources.rootFolders(instance.id, options.refresh === true),
           this.deps.resources.importLists(instance.id, options.refresh === true),
+          // Never throws for a Radarr too old to have the endpoint - it answers
+          // `known: false`, which reaches the guard as incompleteness rather than as a
+          // dead instance. Every other *Arr error still propagates to the catch below.
+          this.deps.resources.collections(instance.id, options.refresh === true),
         ]);
         indexes.push(
-          buildIndex(instance, rootFolders, library.items, importLists, {
-            reachable: true,
-            error: null,
-            fetchedAt: library.fetchedAt,
-            importListsKnown: true,
-          }),
+          buildIndex(
+            instance,
+            rootFolders,
+            library.items,
+            importLists,
+            collections.known ? collections.items : [],
+            {
+              reachable: true,
+              error: null,
+              fetchedAt: library.fetchedAt,
+              importListsKnown: true,
+              collectionsKnown: collections.known,
+            },
+          ),
         );
       } catch (caught) {
         // Unreachable is *unknown*, never "missing": the instance still gets a column,
         // and it contributes to no rollup, total or flag.
         indexes.push(
-          buildIndex(instance, [], [], [], {
+          buildIndex(instance, [], [], [], [], {
             reachable: false,
             error: caught instanceof Error ? caught.message : 'Instance did not answer',
             fetchedAt: null,
-            // Moot: an unreachable instance is never `usable`, so nothing reads this.
+            // Moot: an unreachable instance is never `usable`, so nothing reads these.
             importListsKnown: false,
+            collectionsKnown: false,
           }),
         );
       }
@@ -274,11 +312,13 @@ function buildIndex(
   rootFolders: readonly ArrRootFolder[],
   media: readonly { path: string; title: string; hasFile?: boolean; sizeOnDisk?: number }[],
   importLists: readonly ArrImportList[],
+  collections: readonly ArrCollection[],
   status: {
     reachable: boolean;
     error: string | null;
     fetchedAt: string | null;
     importListsKnown: boolean;
+    collectionsKnown: boolean;
   },
 ): InstancePathIndex {
   const rootFolderMap = new Map<string, ArrRootFolder>();
@@ -287,6 +327,7 @@ function buildIndex(
   const mediaUnder = new Map<string, number>();
   const mediaWithFilesUnder = new Map<string, number>();
   const importListEntries: PathImportList[] = [];
+  const collectionEntries: PathCollection[] = [];
   const childrenByParent = new Map<string, Set<string>>();
 
   const remember = (child: string): void => {
@@ -320,6 +361,19 @@ function buildIndex(
     });
   }
 
+  // Same guard as the import lists above: Radarr stores an unset collection root folder as
+  // an empty string, which must never normalise into a claim on `/`.
+  for (const entry of collections) {
+    if (entry.rootFolderPath.length === 0) continue;
+    collectionEntries.push({
+      id: entry.id,
+      title: entry.title,
+      monitored: entry.monitored,
+      searchOnAdd: entry.searchOnAdd ?? false,
+      path: normalisePath(entry.rootFolderPath),
+    });
+  }
+
   for (const item of media) {
     if (item.path.length === 0) continue;
     const normalised = normalisePath(item.path);
@@ -346,6 +400,7 @@ function buildIndex(
     kind: instance.kind,
     reachable: status.reachable,
     importListsKnown: status.importListsKnown,
+    collectionsKnown: status.collectionsKnown,
     error: status.error,
     fetchedAt: status.fetchedAt,
     rootFolders: rootFolderMap,
@@ -356,6 +411,12 @@ function buildIndex(
     // Shallowest target first, so a card lists what lands here before what lands below.
     importLists: importListEntries.sort(
       (a, b) => a.path.length - b.path.length || a.path.localeCompare(b.path) || a.name.localeCompare(b.name),
+    ),
+    // Same ordering rule as the lists: shallowest first, so a card names what roots here
+    // before what roots below.
+    collections: collectionEntries.sort(
+      (a, b) =>
+        a.path.length - b.path.length || a.path.localeCompare(b.path) || a.title.localeCompare(b.title),
     ),
     childrenByParent,
     rootFolderPrefixes: [...rootFolderMap.keys()].sort(),

@@ -59,6 +59,8 @@ function owner(instanceId: number, use: PathUse, overrides: Partial<PathOwner> =
     title: use === 'tracked' ? 'A Title' : null,
     rootFoldersUnder: use === 'containsRoot' ? [{ id: 1, path: '/data/media/movies' }] : [],
     importLists: [],
+    collections: [],
+    collectionsKnown: true,
     freeSpace: use === 'rootFolder' ? 1_000_000_000 : null,
     totalSpace: use === 'rootFolder' ? 4_000_000_000 : null,
     ...overrides,
@@ -437,6 +439,8 @@ describe('actionsFor', () => {
           { path: '/data/media/movies/europe/auto-feed/0k', rootFolderId: 8 },
           { path: '/data/media/movies/europe/curated-feed/0k', rootFolderId: 9 },
         ],
+        collections: [],
+        collectionsKnown: true,
       },
     ]);
     expect(alignTargetsFor(flagged('/data/media/movies/Dune (2021)', [], [owner(1, 'tracked')]))).toEqual(
@@ -620,6 +624,7 @@ describe('the owner card', () => {
       'Used for',
       'Media',
       'Import lists',
+      'Collections',
     ]);
     expect(ownerFacts(owner(1, 'rootFolder'), '/data/media/movies').some((f) => f.label === 'Root folder')).toBe(
       false,

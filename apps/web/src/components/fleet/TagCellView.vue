@@ -30,7 +30,14 @@ const title = computed(() => {
     return `${props.instanceName}: ${intent.value.label} staged for "${props.label}"`;
   }
   if (props.cell.present) {
-    return `${props.instanceName}: "${props.label}" on ${String(props.cell.mediaCount)} item(s), ${String(props.cell.otherUses)} other use(s) - click to stage a delete`;
+    // Collections are named rather than folded into "other use(s)": they are the ones a
+    // fleet curates by hand, and the reason a tag that looks unused may not be.
+    const collections = !props.cell.collectionsKnown
+      ? ', collections unknown'
+      : props.cell.collectionCount > 0
+        ? `, ${String(props.cell.collectionCount)} collection(s)`
+        : '';
+    return `${props.instanceName}: "${props.label}" on ${String(props.cell.mediaCount)} item(s), ${String(props.cell.otherUses)} other use(s)${collections} - click to stage a delete`;
   }
   return `${props.instanceName}: "${props.label}" missing - click to stage it here`;
 });
@@ -58,8 +65,16 @@ const title = computed(() => {
             {{ cell.mediaCount }}
           </span>
         </span>
-        <span v-if="cell.otherUses > 0" class="text-[9px] opacity-60">
-          +{{ cell.otherUses }} cfg
+        <span
+          v-if="cell.otherUses > 0 || cell.collectionCount > 0 || !cell.collectionsKnown"
+          class="text-[9px] opacity-60"
+        >
+          <template v-if="cell.otherUses > 0">+{{ cell.otherUses }} cfg</template>
+          <template v-if="cell.otherUses > 0 && (cell.collectionCount > 0 || !cell.collectionsKnown)">
+            ·
+          </template>
+          <template v-if="!cell.collectionsKnown">? coll</template>
+          <template v-else-if="cell.collectionCount > 0">{{ cell.collectionCount }} coll</template>
         </span>
       </template>
       <template v-else>

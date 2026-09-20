@@ -5,6 +5,7 @@ import {
   matchPathFilter,
   PATH_SEVERITIES,
   type PathFilter,
+  type PathCollection,
   type PathFlag,
   type PathImportList,
   type PathMatrixColumn,
@@ -253,6 +254,16 @@ export interface AlignTarget {
   readonly name: string;
   readonly kind: 'radarr' | 'sonarr';
   readonly roots: readonly AlignRoot[];
+  /**
+   * Collections rooted at or under this folder, which the rename has to re-aim too.
+   *
+   * Carried per instance rather than per root: a collection roots wherever it likes, and
+   * grouping it under the nearest root folder would be a guess. The dialog rewrites each
+   * one's own path by the same prefix rule the roots use.
+   */
+  readonly collections: readonly PathCollection[];
+  /** False when this instance never reported its collections - stated, never assumed empty. */
+  readonly collectionsKnown: boolean;
 }
 
 /**
@@ -279,6 +290,8 @@ export function alignTargetsFor(node: PathNode): AlignTarget[] {
       name: owner.name,
       kind: owner.kind,
       roots,
+      collections: owner.collections,
+      collectionsKnown: owner.collectionsKnown,
     });
   }
 
@@ -411,6 +424,8 @@ export function ownerHeadline(owner: PathOwner): string {
       return 'used for media below this folder';
     case 'importList':
       return 'used by an import list';
+    case 'collection':
+      return 'used by a Radarr collection';
   }
 }
 
@@ -460,6 +475,21 @@ function describeList(list: PathImportList): string {
 }
 
 /**
+ * One collection, named and stated - never the folder it fills, matching `describeList`.
+ *
+ * `monitored` leads because it is the one that acts unattended: it is what makes Radarr
+ * re-add films here, and what the delete guard refuses over.
+ */
+function describeCollection(entry: PathCollection): string {
+  const state = entry.monitored
+    ? 'monitored'
+    : entry.searchOnAdd
+      ? 'searches on add'
+      : 'not monitored';
+  return `${entry.title} - ${state}`;
+}
+
+/**
  * How this instance uses the folder, as a fact - same shape as Media, so the card is one
  * definition list of "used as / used for" rather than a headline plus a dump of sections.
  */
@@ -497,6 +527,15 @@ function ownerUseFact(owner: PathOwner): OwnerFact {
       return {
         label: 'Used by',
         value: 'an import list',
+        detail: [],
+        tone: 'warn',
+      };
+    case 'collection':
+      // Warn for the same reason the list does: a folder nothing roots at or tracks in,
+      // that a collection nevertheless fills, is a misconfiguration worth seeing.
+      return {
+        label: 'Used by',
+        value: 'a Radarr collection',
         detail: [],
         tone: 'warn',
       };
@@ -554,11 +593,42 @@ export function ownerFacts(owner: PathOwner, path: string): OwnerFact[] {
     });
   }
 
+  // Stated even when there are none, and stated *differently* when we could not ask: a
+  // silent "none root here" on a Radarr that never answered is the unknown-as-empty lie
+  // the whole feature exists to avoid.
+  if (!owner.collectionsKnown) {
+    facts.push({
+      label: 'Collections',
+      value: 'unknown - this instance did not report them',
+      detail: [],
+      tone: 'warn',
+    });
+  } else if (owner.collections.length === 0) {
+    facts.push({ label: 'Collections', value: 'none root here', detail: [], tone: 'muted' });
+  } else {
+    const rootedHere = owner.collections.filter((entry) => entry.path === path);
+    const rootedBelow = owner.collections.filter((entry) => entry.path !== path);
+    facts.push({
+      label: 'Collections',
+      value:
+        rootedBelow.length === 0
+          ? `${pluralise(rootedHere.length, 'collection')} ${adds(rootedHere.length)} here`
+          : rootedHere.length === 0
+            ? pluralise(rootedBelow.length, 'collection')
+            : `${pluralise(rootedHere.length, 'collection')} ${adds(rootedHere.length)} here, ${String(rootedBelow.length)} more`,
+      detail: owner.collections.map(describeCollection),
+      // A monitored one is what refills the folder, so it is the loud case whatever the
+      // instance's use of the folder happens to be.
+      tone: owner.collections.some((entry) => entry.monitored) ? 'warn' : 'normal',
+    });
+  }
+
   return facts;
 }
 
 /** Chip tone per claim. A root folder its own instance cannot see is the loud one. */
 export const USE_CLASSES: Record<PathUse, string> = {
+  collection: 'border-drift/50 bg-drift/10 text-drift',
   rootFolder: 'border-sync/40 bg-sync/8 text-ink hover:border-sync/70',
   tracked: 'border-line bg-transparent text-muted hover:border-line-strong',
   containsRoot: 'border-line-strong bg-transparent text-muted hover:border-accent/60',

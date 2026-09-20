@@ -110,6 +110,7 @@ describe('MediaFilterBar', () => {
       qualityProfiles: [],
       genres: [],
       certifications: [],
+    collections: [],
       rootFolders: [],
     };
     await wrapper.vm.$nextTick();

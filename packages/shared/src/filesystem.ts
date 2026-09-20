@@ -103,6 +103,16 @@ export interface FsPathReference {
   readonly mediaUnder: number;
   /** Lists whose target folder is at or under the path - what refills it after a delete. */
   readonly importLists: readonly PathImportList[];
+  /**
+   * Radarr collections rooted at or under the path.
+   *
+   * The fourth claim, and the same shape of hazard as an import list: a monitored
+   * collection re-adds its films into this folder on the next sync, so a delete that
+   * ignored it would be undone. Required, never optional - an absent array would read as
+   * "no collections" to a caller that forgot, and a destructive guard must never mistake a
+   * gap for a clear.
+   */
+  readonly collections: readonly PathCollection[];
 }
 
 /**
@@ -137,6 +147,13 @@ export interface FsAssumeResolved {
   readonly rootFolders?: boolean;
   /** An `importList.setEnabled` disabling every list that fills the path is staged. */
   readonly importLists?: boolean;
+  /**
+   * A `collection.update` unmonitoring every collection aimed here is staged.
+   *
+   * Unmonitoring rather than deleting: Radarr's API cannot delete a collection at all, so
+   * this is a collection's reversible equivalent of disabling a list.
+   */
+  readonly collections?: boolean;
 }
 
 export interface FsPreflightRequest<K extends FsOp = FsOp> {
@@ -173,6 +190,15 @@ export interface MappingMismatch {
 /** How one instance uses one path, lowest precedence first. */
 export const PATH_USES = [
   /**
+   * A Radarr collection roots at this path, and the instance neither roots, tracks nor
+   * aims a list here.
+   *
+   * Lowest precedence, and it has to exist: without it a folder claimed by nothing but a
+   * collection shows no chip at all, reads as `untracked`, and is then refused deletion by
+   * `collection_under` with nothing on the row to explain why.
+   */
+  'collection',
+  /**
    * An import list adds media here, and the instance neither roots nor tracks anything
    * at this path. On its own that is a misconfiguration - a list pointing at a folder
    * nobody roots at - which is why it earns a chip rather than silence.
@@ -202,6 +228,22 @@ export interface PathImportList {
   /** `enableAuto` (Radarr) / `enableAutomaticAdd` (Sonarr): it adds without being asked. */
   readonly automatic: boolean;
   /** The folder it adds to, which is this path or somewhere under it. */
+  readonly path: string;
+}
+
+/**
+ * One Radarr collection, reduced to what a folder's owner card and the delete guard need.
+ *
+ * `monitored` is the collection's `automatic`: it is what makes Radarr re-add films here
+ * unattended. `searchOnAdd` is the weaker claim - nothing happens until something is
+ * monitored again, but the collection is still aimed at this folder.
+ */
+export interface PathCollection {
+  readonly id: number;
+  readonly title: string;
+  readonly monitored: boolean;
+  readonly searchOnAdd: boolean;
+  /** Its root folder, which is this path or somewhere under it. */
   readonly path: string;
 }
 
@@ -260,6 +302,23 @@ export interface PathOwner {
    * actionable half and each entry carries its own `path` to say where it lands.
    */
   readonly importLists: readonly PathImportList[];
+  /**
+   * Every Radarr collection on this instance rooted at or under this path, the ones
+   * targeting it exactly first.
+   *
+   * Empty on every Sonarr instance, which is a fact about the app rather than a gap - see
+   * `collectionsKnown`.
+   */
+  readonly collections: readonly PathCollection[];
+  /**
+   * Whether this instance's collections could be read at all.
+   *
+   * False for a Radarr too old to expose `/collection`, or one whose read failed. **True
+   * for Sonarr**, which has no collections to be ignorant of - vacuously known, and
+   * load-bearing: `false` there would make every fleet containing a Sonarr incomplete and
+   * block every folder delete in the app.
+   */
+  readonly collectionsKnown: boolean;
   /**
    * Free/total space *Arr itself reports for its root folder here.
    *

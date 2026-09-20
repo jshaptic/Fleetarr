@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import type { ArrImportList, ArrMedia, ArrRootFolder, Instance } from '@fleetarr/shared';
+import type {
+  ArrCollection,
+  ArrImportList,
+  ArrMedia,
+  ArrRootFolder,
+  Instance,
+} from '@fleetarr/shared';
 import type { InstancesRepository } from '../repositories/instances.repo.js';
 import {
   isAtOrUnder,
@@ -51,6 +57,23 @@ function importList(id: number, rootFolderPath: string, overrides: Partial<ArrIm
   };
 }
 
+function arrCollection(
+  id: number,
+  rootFolderPath: string,
+  overrides: Partial<ArrCollection> = {},
+): ArrCollection {
+  return {
+    id,
+    title: `Collection ${String(id)}`,
+    monitored: true,
+    searchOnAdd: true,
+    qualityProfileId: 0,
+    rootFolderPath,
+    tags: [],
+    ...overrides,
+  };
+}
+
 /** A stand-in for the two services the index reads through. */
 function serviceFor(
   fleet: ReadonlyArray<{
@@ -58,10 +81,14 @@ function serviceFor(
     rootFolders?: readonly ArrRootFolder[];
     media?: readonly ArrMedia[];
     importLists?: readonly ArrImportList[];
+    collections?: readonly ArrCollection[];
     fails?: boolean;
     cached?: boolean;
     /** Cached separately: media can be in the snapshot cache while the lists are not. */
     listsCached?: boolean;
+    collectionsCached?: boolean;
+    /** A Radarr too old for /collection: known:false rather than an empty list. */
+    collectionsUnsupported?: boolean;
   }>,
 ): { service: PathIndexService; fetches: () => number } {
   let fetches = 0;
@@ -91,6 +118,23 @@ function serviceFor(
       fetches += 1;
       return entry?.importLists ?? [];
     },
+    collections: async (id: number) => {
+      const entry = find(id);
+      if (entry?.fails === true) throw new Error('instance did not answer');
+      // Sonarr is answered without a request - it has no collections, which is an answer.
+      if (entry?.instance.kind !== 'radarr') {
+        return { known: true, items: [], fetchedAt: '2026-01-01T00:00:00.000Z' };
+      }
+      if (entry.collectionsUnsupported === true) {
+        return { known: false, reason: 'no collections endpoint' };
+      }
+      fetches += 1;
+      return {
+        known: true,
+        items: entry.collections ?? [],
+        fetchedAt: '2026-01-01T00:00:00.000Z',
+      };
+    },
     peekMediaLibrary: (id: number) => {
       const entry = find(id);
       return entry?.cached === false ? null : (entry?.media ?? []);
@@ -105,6 +149,13 @@ function serviceFor(
       const entry = find(id);
       if (entry?.cached === false || entry?.listsCached === false) return null;
       return entry?.importLists ?? [];
+    },
+    peekCollections: (id: number) => {
+      const entry = find(id);
+      if (entry?.instance.kind !== 'radarr') return [];
+      if (entry.cached === false || entry.collectionsCached === false) return null;
+      if (entry.collectionsUnsupported === true) return null;
+      return entry.collections ?? [];
     },
   } as unknown as ResourcesService;
 
@@ -324,6 +375,61 @@ describe('PathIndexService', () => {
 
       assert.deepEqual((await service.referencedBy('/data/movies-4k')).instanceIds, []);
       assert.deepEqual((await service.referencedBy('/data/mov')).instanceIds, []);
+    });
+
+    test('a collection is a claim in its own right, even with nothing else pointing here', async () => {
+      // The gap this closes: with no root folder, no media and no list, the folder used to
+      // be reported as referenced by nobody - and then a monitored collection rebuilt it.
+      const { service } = serviceFor([
+        {
+          instance: instance(),
+          rootFolders: [rootFolder('/data/media/movies')],
+          media: [],
+          collections: [arrCollection(1, '/data/media/collections')],
+        },
+      ]);
+
+      const references = await service.referencedBy('/data/media/collections');
+
+      assert.deepEqual(references.instanceIds, [1]);
+      assert.deepEqual(references.instances[0]?.collections, [
+        { id: 1, title: 'Collection 1', monitored: true, searchOnAdd: true, path: '/data/media/collections' },
+      ]);
+      assert.equal(references.complete, true);
+    });
+
+    test('a Radarr with no collections endpoint is unknown, never "no collections"', async () => {
+      const { service } = serviceFor([
+        {
+          instance: instance(),
+          rootFolders: [rootFolder('/data/media')],
+          media: [],
+          collectionsUnsupported: true,
+        },
+      ]);
+
+      const references = await service.referencedBy('/data/media', { allowFetch: true });
+
+      // It still answers everything else - it is one unreadable claim, not a dead
+      // instance - but the fleet's view is incomplete, so a delete cannot clear the path.
+      assert.deepEqual(references.instanceIds, [1]);
+      assert.equal(references.complete, false);
+    });
+
+    test('Sonarr having no collections does not make the fleet incomplete', async () => {
+      // Load-bearing: `collectionsKnown: false` for Sonarr would block every folder
+      // delete in any fleet with a Sonarr in it.
+      const { service } = serviceFor([
+        {
+          instance: instance({ id: 2, name: 'Sonarr', kind: 'sonarr' }),
+          rootFolders: [rootFolder('/data/media/tv', 5)],
+          media: [],
+        },
+      ]);
+
+      const references = await service.referencedBy('/data/media/tv', { allowFetch: true });
+
+      assert.equal(references.complete, true);
     });
 
     test('names each claim, so a caller can tell a registration from a library', async () => {

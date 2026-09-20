@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import type { FsPreflight, PathImportList } from '@fleetarr/shared';
+import type { FsPreflight, PathCollection, PathImportList } from '@fleetarr/shared';
 import BaseButton from '@/components/base/BaseButton.vue';
 import BaseCheckbox from '@/components/base/BaseCheckbox.vue';
 import BaseSelect from '@/components/base/BaseSelect.vue';
@@ -14,7 +14,12 @@ import { rewritePathPrefix } from '@/lib/fs-tree';
 import { rootFolderOwners } from '@/lib/path-matrix';
 import { useMatrixStore } from '@/stores/matrix';
 import { usePathsStore } from '@/stores/paths';
-import { useQueueStore, type RemapListTarget, type RemapTarget } from '@/stores/queue';
+import {
+  useQueueStore,
+  type RemapCollectionTarget,
+  type RemapListTarget,
+  type RemapTarget,
+} from '@/stores/queue';
 import { useUiStore } from '@/stores/ui';
 
 /**
@@ -43,6 +48,7 @@ const ui = useUiStore();
 const toPath = ref('');
 const removeOld = ref(true);
 const repointLists = ref(true);
+const repointCollections = ref(true);
 const acknowledgeNotEmpty = ref(false);
 const included = ref<number[]>([]);
 const counts = ref<Record<number, number | 'loading' | 'error'>>({});
@@ -75,6 +81,8 @@ const candidates = computed(() =>
         .find((column) => column.instance.id === owner.instanceId)
         ?.rootFolders.some((folder) => folder.path === destination.value) ?? false,
     importLists: owner.importLists,
+    collections: owner.collections,
+    collectionsKnown: owner.collectionsKnown,
   })),
 );
 
@@ -187,6 +195,57 @@ const strandedLists = computed(() =>
       })),
     ),
 );
+
+/**
+ * Collections still rooted in the folder being left, and where each would point instead.
+ *
+ * Same prefix rewrite as the lists, and for the same reason: a collection rooted at
+ * `movies/marvel` under a root folder being switched belongs at `<new>/marvel`, not at
+ * the new root. A monitored one re-adds its films into the old folder otherwise, which is
+ * this switch quietly undoing itself.
+ */
+const strandedCollections = computed(() =>
+  candidates.value
+    .filter((candidate) => included.value.includes(candidate.instanceId))
+    .flatMap((candidate) =>
+      candidate.collections.map((entry: PathCollection) => ({
+        instanceId: candidate.instanceId,
+        collectionId: entry.id,
+        title: entry.title,
+        monitored: entry.monitored,
+        from: entry.path,
+        to:
+          destination.value.length === 0
+            ? entry.path
+            : rewritePathPrefix(entry.path, props.fromPath, destination.value),
+      })),
+    ),
+);
+
+/** Instances that never reported their collections - stated once, never a silent zero. */
+const collectionsUnknownOn = computed(() =>
+  candidates.value
+    .filter((candidate) => included.value.includes(candidate.instanceId))
+    .filter((candidate) => !candidate.collectionsKnown)
+    .map((candidate) => candidate.name),
+);
+
+function collectionTargetsFor(instanceId: number): RemapCollectionTarget[] {
+  if (!repointCollections.value) return [];
+  // Grouped by destination: several collections landing on the same folder are one
+  // editor call, which is the unit `collection.update` takes.
+  const byDestination = new Map<string, number[]>();
+  for (const entry of strandedCollections.value) {
+    if (entry.instanceId !== instanceId) continue;
+    const group = byDestination.get(entry.to);
+    if (group === undefined) byDestination.set(entry.to, [entry.collectionId]);
+    else group.push(entry.collectionId);
+  }
+  return [...byDestination].map(([toRootFolderPath, collectionIds]) => ({
+    toRootFolderPath,
+    collectionIds,
+  }));
+}
 
 function listTargetsFor(instanceId: number): RemapListTarget[] {
   if (!repointLists.value) return [];
@@ -399,6 +458,7 @@ async function confirm(): Promise<void> {
       needsRootFolder: !candidate.hasDestination,
       removeRootFolderId: removeOld.value ? candidate.oldRootFolderId : null,
       importLists: listTargetsFor(candidate.instanceId),
+      collections: collectionTargetsFor(candidate.instanceId),
     });
   }
 
@@ -675,6 +735,62 @@ watch(crossDevice, (crosses) => {
             </span>
           </label>
         </div>
+
+        <div
+          v-if="strandedCollections.length > 0"
+          class="space-y-2 rounded-md border px-3 py-2.5"
+          :class="repointCollections ? 'border-line bg-raised/40' : 'border-drift/40 bg-drift/5'"
+          data-testid="stranded-collections"
+        >
+          <label class="flex items-start gap-2 text-xs">
+            <BaseCheckbox
+              v-model="repointCollections"
+              data-testid="repoint-collections"
+              class="mt-0.5"
+            />
+            <span>
+              <span class="font-medium text-ink">
+                Aim {{ strandedCollections.length }} collection(s) at the new folder
+              </span>
+              <span class="block text-[11px] leading-relaxed text-muted">
+                A monitored collection re-adds its films on the next sync. Left pointing at
+                <span class="font-mono">{{ props.fromPath }}</span>, it refills the folder the
+                media just left.
+              </span>
+            </span>
+          </label>
+
+          <ul class="space-y-0.5 pl-6 font-mono text-[10px]">
+            <li
+              v-for="entry in strandedCollections"
+              :key="`${entry.instanceId}-${entry.collectionId}`"
+            >
+              <span class="text-ink">{{ entry.title }}</span>
+              <span v-if="!entry.monitored" class="text-faint"> (not monitored)</span>
+              <span class="text-faint"> {{ entry.from }}</span>
+              <template v-if="repointCollections && destination.length > 0">
+                <span class="text-faint"> → </span><span class="text-sync">{{ entry.to }}</span>
+              </template>
+            </li>
+          </ul>
+
+          <BaseNotice v-if="!repointCollections" tone="warn">
+            Left alone, so re-point them in Radarr yourself.
+          </BaseNotice>
+        </div>
+
+        <!--
+          An absent line here would read as "there were none", and the switch would look
+          complete while a collection it could not see refilled the old folder.
+        -->
+        <BaseNotice
+          v-if="collectionsUnknownOn.length > 0"
+          tone="warn"
+          data-testid="collections-unknown"
+        >
+          {{ collectionsUnknownOn.join(', ') }} did not report their collections - none of
+          theirs are being re-pointed.
+        </BaseNotice>
 
         <div
           v-if="strandedLists.length > 0"

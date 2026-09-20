@@ -52,6 +52,7 @@ const EXAMPLES: ReadonlyArray<[string, string]> = [
   ['instances>1', 'every title the fleet holds more than once'],
   ['instance:radarr-4k NOT any(instance:radarr-hd)', 'on 4K, absent from HD'],
   ['list:"Trakt watchlist"', 'from that list - Radarr only, so Sonarr rows are undecided'],
+  ['collection:*Matrix*', 'in a TMDB collection; a series has none, so those are a plain no'],
   ['size>20GB hasFile:true', '1024-based, like the sizes on screen'],
   ['root:/data/media/4k', 'one root folder; root:4k matches any with that segment'],
   ['added>-30d', 'added in the last 30 days'],

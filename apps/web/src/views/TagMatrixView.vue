@@ -283,7 +283,7 @@ onMounted(() => {
                 <span
                   v-if="row.unusedEverywhere"
                   class="rounded border border-line px-1 py-0.5 text-[10px] text-faint"
-                  title="Not attached to any media or config on any instance"
+                  title="Not attached to any media, config or collection on any instance"
                 >
                   unused
                 </span>

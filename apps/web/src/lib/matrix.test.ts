@@ -1,4 +1,4 @@
-import type { ArrImportList, ArrRootFolder, ArrTagDetail, Instance } from '@fleetarr/shared';
+import type { ArrCollection, ArrImportList, ArrRootFolder, ArrTagDetail, Instance } from '@fleetarr/shared';
 import { describe, expect, it } from 'vitest';
 import {
   buildImportListRows,
@@ -40,6 +40,18 @@ function tag(id: number, label: string, mediaIds: number[] = []): ArrTagDetail {
   };
 }
 
+function collection(id: number, title: string, tags: number[] = []): ArrCollection {
+  return {
+    id,
+    title,
+    monitored: true,
+    searchOnAdd: true,
+    qualityProfileId: 1,
+    rootFolderPath: '/data/media',
+    tags,
+  };
+}
+
 function rootFolder(id: number, path: string, accessible = true): ArrRootFolder {
   return { id, path, accessible, freeSpace: 1000, totalSpace: 5000 };
 }
@@ -62,7 +74,7 @@ function importList(id: number, name: string, overrides: Partial<ArrImportList> 
 function snapshot(
   id: number,
   name: string,
-  parts: Partial<Pick<InstanceSnapshot, 'status' | 'tags' | 'rootFolders' | 'importLists' | 'qualityProfiles'>> = {},
+  parts: Partial<Pick<InstanceSnapshot, 'status' | 'tags' | 'rootFolders' | 'importLists' | 'qualityProfiles' | 'collections'>> = {},
 ): InstanceSnapshot {
   return {
     instance: instance(id, name),
@@ -73,6 +85,8 @@ function snapshot(
     rootFolders: parts.rootFolders ?? [],
     importLists: parts.importLists ?? [],
     qualityProfiles: parts.qualityProfiles ?? [],
+    // `??` would turn an explicit null into [], which is the very distinction under test.
+    collections: 'collections' in parts ? (parts.collections ?? null) : [],
   };
 }
 
@@ -111,6 +125,45 @@ describe('tag matrix', () => {
 
   it('reports a tag attached to nothing anywhere as unused', () => {
     const row = buildTagRows(fleet).find((entry) => entry.label === 'kids');
+    expect(row?.unusedEverywhere).toBe(true);
+  });
+
+  it('a tag carried only by a collection is not unused - the bug that deleted one', () => {
+    // `/tag/detail` reports indexers, lists, notifications, restrictions and delay
+    // profiles, but not collections. Counting only those made a collection-only tag read
+    // as a deletion candidate.
+    const withCollection = [
+      snapshot(1, 'Radarr-4K', {
+        tags: [tag(2, 'kids')],
+        collections: [collection(1, 'Kids Collection', [2])],
+      }),
+    ];
+    const row = buildTagRows(withCollection).find((entry) => entry.label === 'kids');
+
+    expect(row?.totalMedia).toBe(0);
+    expect(row?.totalCollections).toBe(1);
+    expect(row?.unusedEverywhere).toBe(false);
+    expect(row?.cells[0]?.collectionCount).toBe(1);
+  });
+
+  it('an unread collection set is not "unused" either - unknown is not zero', () => {
+    const unknown = [snapshot(1, 'Radarr-Old', { tags: [tag(2, 'kids')], collections: null })];
+    const row = buildTagRows(unknown).find((entry) => entry.label === 'kids');
+
+    expect(row?.cells[0]?.collectionsKnown).toBe(false);
+    expect(row?.totalCollections).toBe(0);
+    expect(row?.unusedEverywhere).toBe(false);
+  });
+
+  it('a tag nothing carries at all, collections included, is still unused', () => {
+    const bare = [
+      snapshot(1, 'Radarr-4K', {
+        tags: [tag(2, 'kids')],
+        collections: [collection(1, 'Other Collection', [9])],
+      }),
+    ];
+    const row = buildTagRows(bare).find((entry) => entry.label === 'kids');
+
     expect(row?.unusedEverywhere).toBe(true);
   });
 

@@ -49,8 +49,24 @@ export interface FakeMedia {
   studio?: string;
   network?: string;
   seriesType?: string;
+  /** Radarr only - stripped from every Sonarr response by `asFlavour`. */
+  collection?: { title: string; tmdbId: number };
   /** Sonarr keeps size and file counts here rather than at the top level. */
   statistics?: { episodeCount?: number; episodeFileCount?: number; sizeOnDisk?: number };
+}
+
+/** A Radarr collection. Radarr only - Sonarr 404s the whole endpoint. */
+export interface FakeCollection {
+  id: number;
+  title: string;
+  monitored: boolean;
+  searchOnAdd: boolean;
+  qualityProfileId: number;
+  minimumAvailability: string;
+  rootFolderPath: string;
+  tags: number[];
+  /** An extra field the client must preserve through a merged PUT but never parses. */
+  secretServerField?: string;
 }
 
 /** One entry of what an import list currently holds. Radarr only. */
@@ -102,6 +118,7 @@ export interface FakeArrState {
   media: FakeMedia[];
   importLists: FakeImportList[];
   importListMovies: FakeImportListMovie[];
+  collections: FakeCollection[];
   qualityProfiles: FakeQualityProfile[];
   commands: FakeCommand[];
 }
@@ -195,6 +212,30 @@ function defaultState(): FakeArrState {
       // Not in the library: the projection drops it, which is what bounds the payload.
       { tmdbId: 999_999, title: 'Not Added Yet', lists: [1], isExisting: false },
     ],
+    collections: [
+      {
+        id: 1,
+        title: 'Dune Collection',
+        monitored: true,
+        searchOnAdd: true,
+        qualityProfileId: 1,
+        minimumAvailability: 'released',
+        rootFolderPath: '/data/media',
+        tags: [1],
+        secretServerField: 'must-survive-put',
+      },
+      {
+        id: 2,
+        title: 'Heat Collection',
+        monitored: false,
+        searchOnAdd: false,
+        qualityProfileId: 1,
+        minimumAvailability: 'released',
+        rootFolderPath: '/data/media-4k',
+        tags: [],
+        secretServerField: 'must-survive-put',
+      },
+    ],
   };
 }
 
@@ -218,6 +259,11 @@ function makeMedia(id: number, title: string, path: string, tags: number[]): Fak
     status: 'released',
     added: '2024-01-15T10:00:00Z',
     genres: ['Drama'],
+    // Only Dune is in a collection, so `/media` has a row that answers and rows that
+    // legitimately read `collection:none`.
+    ...(title === 'Dune'
+      ? { collection: { title: 'Dune Collection', tmdbId: 726_871 } }
+      : {}),
   };
 }
 
@@ -234,6 +280,17 @@ export async function startFakeArr(
   const behaviour: FakeArrBehaviour = { delayMs: 0, rejectTagLabel: null, serveHtml: false };
   const requests: Array<{ method: string; path: string; query?: string }> = [];
   const deleted: FakeArrServer['deleted'] = [];
+
+  /**
+   * One seed, two flavours. Sonarr has no collections at all, so a series must never
+   * carry the field - without this the fake is more generous than the real app and a
+   * `collection:none` test passes for the wrong reason.
+   */
+  const asFlavour = (media: FakeMedia): FakeMedia => {
+    if (kind === 'radarr') return media;
+    const { collection: _dropped, ...series } = media;
+    return series;
+  };
 
   const mediaPath = kind === 'radarr' ? '/movie' : '/series';
   const idKey = kind === 'radarr' ? 'movieIds' : 'seriesIds';
@@ -397,14 +454,14 @@ export async function startFakeArr(
 
     // --------------------------------------------------------------- media
     if (method === 'GET' && path === mediaPath) {
-      send(res, 200, state.media);
+      send(res, 200, state.media.map(asFlavour));
       return;
     }
     if (method === 'GET' && path.startsWith(`${mediaPath}/`) && !path.endsWith('/editor')) {
       const id = Number(path.split('/')[2]);
       const media = state.media.find((m) => m.id === id);
       if (!media) return send(res, 404, { message: 'NotFound' });
-      send(res, 200, media);
+      send(res, 200, asFlavour(media));
       return;
     }
     if (method === 'DELETE' && path === `${mediaPath}/editor`) {
@@ -544,6 +601,53 @@ export async function startFakeArr(
       state.importLists = state.importLists.filter((l) => l.id !== id);
       send(res, 200, {});
       return;
+    }
+
+    // --------------------------------------------------------- collections
+    // Sonarr 404s every one of these, which is what makes collections unknown there
+    // rather than empty - the same shape as /importlist/movie above.
+    if (path === '/collection' || /^\/collection\/\d+$/.test(path)) {
+      if (kind !== 'radarr') {
+        return send(res, 404, { message: 'Not Found' });
+      }
+      if (method === 'GET' && path === '/collection') {
+        return send(res, 200, state.collections);
+      }
+      if (method === 'GET') {
+        const id = Number(path.split('/')[2]);
+        const found = state.collections.find((entry) => entry.id === id);
+        if (!found) return send(res, 404, { message: 'NotFound' });
+        return send(res, 200, found);
+      }
+      if (method === 'PUT' && path === '/collection') {
+        // The editor: partial by design, keyed by collectionIds. No tags key exists here.
+        const body = await readBody(req);
+        const ids = (body['collectionIds'] as number[] | undefined) ?? [];
+        const { collectionIds: _ignored, ...changes } = body;
+        const touched: FakeCollection[] = [];
+        for (const id of ids) {
+          const index = state.collections.findIndex((entry) => entry.id === id);
+          if (index === -1) continue;
+          const updated = { ...state.collections[index], ...changes } as FakeCollection;
+          state.collections[index] = updated;
+          touched.push(updated);
+        }
+        return send(res, 202, touched);
+      }
+      if (method === 'PUT') {
+        const id = Number(path.split('/')[2]);
+        const body = await readBody(req);
+        const index = state.collections.findIndex((entry) => entry.id === id);
+        if (index === -1) return send(res, 404, { message: 'NotFound' });
+        if (typeof body['secretServerField'] !== 'string') {
+          // As with import lists: a partial PUT wipes what it omits, so the test fails
+          // loudly if a caller forgets mergeForPut.
+          return send(res, 400, validationFailure('SecretServerField', 'Field is required'));
+        }
+        const updated = { ...state.collections[index], ...body } as FakeCollection;
+        state.collections[index] = updated;
+        return send(res, 202, updated);
+      }
     }
 
     send(res, 404, { message: `NotFound: ${method} ${path}` });

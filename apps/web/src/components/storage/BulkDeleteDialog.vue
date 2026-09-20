@@ -8,8 +8,10 @@ import IconError from '@/components/base/icons/IconError.vue';
 import IconWarning from '@/components/base/icons/IconWarning.vue';
 import {
   assumeResolved,
+  disableCollectionTargets,
   disableListTargets,
   needsForce as forceStillNeeded,
+  needsCollectionBridge,
   needsImportListBridge,
   needsRootFolderBridge,
   unassignTargets,
@@ -59,6 +61,7 @@ const force = ref(false);
  */
 const bridgeRoots = ref(true);
 const bridgeLists = ref(false);
+const bridgeCollections = ref(false);
 const typed = ref('');
 
 const results = ref<Record<string, FsPreflight | 'error'>>({});
@@ -77,7 +80,11 @@ async function check(): Promise<void> {
             await paths.preflight(
               'fs.delete',
               { path: node.path, recursive: recursive.value, force: force.value },
-              assumeResolved(bridgeRoots.value, bridgeLists.value),
+              assumeResolved({
+                rootFolders: bridgeRoots.value,
+                importLists: bridgeLists.value,
+                collections: bridgeCollections.value,
+              }),
             ),
           ] as const;
         } catch {
@@ -94,7 +101,7 @@ async function check(): Promise<void> {
 /**
  * Every message at one severity, joined.
  *
- * The *Arr side is four checks rather than one, so a folder can be refused for two
+ * The *Arr side is five checks rather than one, so a folder can be refused for two
  * unrelated reasons at once - and a row that names only the first would send someone to
  * fix a root folder when the media underneath was the real answer.
  */
@@ -181,6 +188,7 @@ const needsRecursive = computed(() =>
  */
 const canUnassign = computed(() => preflights.value.some(needsRootFolderBridge));
 const canDisableLists = computed(() => preflights.value.some(needsImportListBridge));
+const canDisableCollections = computed(() => preflights.value.some(needsCollectionBridge));
 const needsForce = computed(() => preflights.value.some(forceStillNeeded));
 
 const totalSize = computed(() =>
@@ -220,6 +228,12 @@ async function confirm(): Promise<void> {
               path: target.path,
             }))
           : [],
+        disableCollections: bridgeCollections.value
+          ? disableCollectionTargets(preflight).map((target) => ({
+              instanceId: target.instanceId,
+              collectionIds: target.collectionIds,
+            }))
+          : [],
         disableLists: bridgeLists.value
           ? disableListTargets(preflight).map((target) => ({
               instanceId: target.instanceId,
@@ -242,7 +256,7 @@ watch([needsRecursive, needsForce], ([recursiveNeeded, forceNeeded]) => {
   if (!forceNeeded && force.value) force.value = false;
 });
 
-watch([recursive, force, bridgeRoots, bridgeLists], () => void check());
+watch([recursive, force, bridgeRoots, bridgeLists, bridgeCollections], () => void check());
 </script>
 
 <template>
@@ -343,6 +357,21 @@ watch([recursive, force, bridgeRoots, bridgeLists], () => void check());
           <span class="font-medium text-ink">Also disable the import lists that fill them</span>
           <span class="block text-[11px]">
             Otherwise the next sync recreates the folder each list is aimed at.
+          </span>
+        </span>
+      </label>
+
+      <label v-if="canDisableCollections" class="flex items-start gap-2 text-xs text-muted">
+        <BaseCheckbox
+          v-model="bridgeCollections"
+          data-testid="bulk-delete-disable-collections"
+          class="mt-0.5"
+        />
+        <span>
+          <span class="font-medium text-ink">Also unmonitor the collections aimed at them</span>
+          <span class="block text-[11px]">
+            Radarr cannot delete a collection, so this unmonitors it instead - otherwise its
+            next sync re-adds its films and rebuilds the folder.
           </span>
         </span>
       </label>

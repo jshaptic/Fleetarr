@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, write
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
-import type { FsPathReference, PathImportList } from '@fleetarr/shared';
+import type { FsPathReference, PathCollection, PathImportList } from '@fleetarr/shared';
 import { FsError } from '../lib/errors.js';
 import { FilesystemService } from './filesystem.service.js';
 import { PathGuard } from './paths.js';
@@ -16,12 +16,17 @@ function reference(instanceId: number, claim: Partial<FsPathReference> = {}): Fs
     rootFolders: [{ id: instanceId * 10, path: '/does-not-matter' }],
     mediaUnder: 0,
     importLists: [],
+    collections: [],
     ...claim,
   };
 }
 
 function list(claim: Partial<PathImportList> = {}): PathImportList {
   return { id: 1, name: 'Trending', enabled: true, automatic: true, path: '/x', ...claim };
+}
+
+function collection(claim: Partial<PathCollection> = {}): PathCollection {
+  return { id: 1, title: 'Dune Collection', monitored: true, searchOnAdd: true, path: '/x', ...claim };
 }
 
 async function makeService(
@@ -443,6 +448,84 @@ describe('FilesystemService', () => {
     const check = bridged.checks.find((entry) => entry.id === 'import_list_under');
     assert.equal(check?.status, 'warning');
     assert.match(check?.message ?? '', /2 enabled import list\(s\).*staged operation/);
+  });
+
+  test('a collection is graded by what it does unattended', async () => {
+    const target = path.join(root, 'movies', 'Arrival (2016)');
+    const payload = { path: target, recursive: true, force: false };
+    const withCollection = async (entry: PathCollection): Promise<string | undefined> => {
+      const service = await makeService([root], [
+        reference(7, { rootFolders: [], collections: [entry] }),
+      ]);
+      const preflight = await service.preflight('fs.delete', payload);
+      return preflight.checks.find((check) => check.id === 'collection_under')?.status;
+    };
+
+    // Monitored: Radarr re-adds its films here on the next sync, recreating the folder.
+    assert.equal(await withCollection(collection({ monitored: true })), 'blocker');
+    // Not monitored, but still aimed here - nothing happens unattended.
+    assert.equal(
+      await withCollection(collection({ monitored: false, searchOnAdd: true })),
+      'warning',
+    );
+    // Neither: not a finding at all.
+    assert.equal(
+      await withCollection(collection({ monitored: false, searchOnAdd: false })),
+      'ok',
+    );
+  });
+
+  test('a folder only a collection roots at is still a claim, and still refused', async () => {
+    // The whole reason the check exists: with no root folder, no media and no list, the
+    // old guard found nothing and the delete went through - then Radarr rebuilt it.
+    const service = await makeService([root], [
+      reference(7, { rootFolders: [], mediaUnder: 0, collections: [collection()] }),
+    ]);
+    const payload = { path: path.join(root, 'movies', 'Arrival (2016)'), recursive: true, force: false };
+
+    const refused = await service.preflight('fs.delete', payload);
+
+    assert.equal(refused.ok, false);
+    assert.deepEqual(refused.referencedBy, [7], 'the instance is named, not dropped');
+    assert.equal(refused.checks.find((check) => check.id === 'root_folder_under')?.status, 'ok');
+    assert.equal(refused.checks.find((check) => check.id === 'media_under')?.status, 'ok');
+    assert.equal(refused.checks.find((check) => check.id === 'collection_under')?.status, 'blocker');
+  });
+
+  test('unmonitoring the collections clears both the refusal and the warning in one answer', async () => {
+    const service = await makeService([root], [
+      reference(7, {
+        rootFolders: [],
+        collections: [
+          collection({ id: 1, monitored: true }),
+          collection({ id: 2, monitored: false, searchOnAdd: true }),
+        ],
+      }),
+    ]);
+    const payload = { path: path.join(root, 'movies', 'Arrival (2016)'), recursive: true, force: false };
+
+    const bridged = await service.preflight('fs.delete', payload, { collections: true });
+
+    assert.equal(bridged.ok, true);
+    const check = bridged.checks.find((entry) => entry.id === 'collection_under');
+    assert.equal(check?.status, 'warning');
+    assert.match(check?.message ?? '', /2 collection\(s\).*staged operation/);
+  });
+
+  test('a collection promise cannot launder tracked media', async () => {
+    const service = await makeService([root], [
+      reference(7, { rootFolders: [], mediaUnder: 3, collections: [collection()] }),
+    ]);
+    const payload = { path: path.join(root, 'movies', 'Arrival (2016)'), recursive: true, force: false };
+
+    const bridged = await service.preflight('fs.delete', payload, {
+      collections: true,
+      rootFolders: true,
+      importLists: true,
+    });
+
+    assert.equal(bridged.ok, false, 'media_under answers to force alone');
+    assert.equal(bridged.checks.find((check) => check.id === 'media_under')?.status, 'blocker');
   });
 
   test('a fleet it could not read is never bridgeable - a promise about the unseen is worth nothing', async () => {

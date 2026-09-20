@@ -21,6 +21,10 @@ export const ARR_OPS = [
   'importList.update',
   'importList.delete',
   'importList.setEnabled',
+  'collection.update',
+  'collectionTags.add',
+  'collectionTags.remove',
+  'collectionTags.set',
 ] as const;
 export type ArrOp = (typeof ARR_OPS)[number];
 
@@ -67,6 +71,8 @@ export const TARGET_KINDS = [
   'tag',
   'rootFolder',
   'importList',
+  /** A Radarr collection. Radarr only - Sonarr has no equivalent resource. */
+  'collection',
   'movie',
   'series',
   /** A directory on mounted storage. */
@@ -87,13 +93,44 @@ export interface ImportListChanges {
 }
 
 /**
+ * Field-level changes for a Radarr collection, sent to the collection editor.
+ *
+ * **No `tags` key, deliberately** - tags live in `collectionTags.add|remove|set`. Three
+ * reasons, each on its own decisive: `resolveTagIds` folds a `tag.create` dependency into a
+ * *flat* `tagIds` array, so a nested list could never join that chain; the staging guard
+ * that rejects an empty `tagIds` with no producer cannot see inside `changes`; and a merged
+ * PUT of `tags` is a *replace*, so two dependents each adding one created label would wipe
+ * each other. `ImportListChanges.tags` is the existing version of that mistake - nothing
+ * chains a `tag.create` into an import list, and this is why.
+ */
+export interface CollectionChanges {
+  rootFolderPath?: string;
+  qualityProfileId?: number;
+  minimumAvailability?: string;
+  monitored?: boolean;
+  /** Whether the collection's films are monitored as they are added. */
+  monitorMovies?: boolean;
+  searchOnAdd?: boolean;
+}
+
+/**
  * op -> payload. This map is the single source of truth for the whole queue:
  * add an op here and every exhaustive switch in server and UI stops compiling.
  */
 export interface QueueOpPayloads {
   'tag.create': { label: string };
   'tag.rename': { tagId: number; from: string; to: string };
-  'tag.delete': { tagId: number; label: string; detachFromMedia: boolean };
+  /**
+   * `detachFromMedia` and `detachFromCollections` are separate because the two detachments
+   * use different endpoints - the media editor and a per-collection merged PUT - and a
+   * fleet with no collections should not pay for the second.
+   */
+  'tag.delete': {
+    tagId: number;
+    label: string;
+    detachFromMedia: boolean;
+    detachFromCollections: boolean;
+  };
   'tag.merge': { sourceTagIds: number[]; targetTagId: number; deleteSources: boolean };
   'mediaTags.add': { mediaIds: number[]; tagIds: number[] };
   'mediaTags.remove': { mediaIds: number[]; tagIds: number[] };
@@ -126,6 +163,18 @@ export interface QueueOpPayloads {
   'importList.update': { importListId: number; changes: ImportListChanges };
   'importList.delete': { importListId: number };
   'importList.setEnabled': { importListId: number; enabled: boolean; enableAutomaticAdd: boolean };
+  /**
+   * Re-point, re-profile or unmonitor collections, through Radarr's collection editor.
+   *
+   * Plural where `importList.update` is singular: the editor takes a list, and every caller
+   * - a root folder remap, a delete bridge - touches all the collections under one folder at
+   * once. One queue row, one HTTP call.
+   */
+  'collection.update': { collectionIds: number[]; changes: CollectionChanges };
+  'collectionTags.add': { collectionIds: number[]; tagIds: number[] };
+  'collectionTags.remove': { collectionIds: number[]; tagIds: number[] };
+  /** The exact tag list, replacing whatever was there. Empty means "clear them all". */
+  'collectionTags.set': { collectionIds: number[]; tagIds: number[] };
   'fs.mkdir': { path: string; recursive: boolean };
   /** Same parent directory, new name. */
   'fs.rename': { from: string; to: string };
@@ -219,6 +268,15 @@ const importListChangesSchema: z.ZodType<ImportListChanges> = z.object({
 
 const idList = z.array(z.number().int().positive()).min(1);
 
+const collectionChangesSchema: z.ZodType<CollectionChanges> = z.object({
+  rootFolderPath: z.string().min(1).optional(),
+  qualityProfileId: z.number().int().positive().optional(),
+  minimumAvailability: z.string().optional(),
+  monitored: z.boolean().optional(),
+  monitorMovies: z.boolean().optional(),
+  searchOnAdd: z.boolean().optional(),
+});
+
 /**
  * Absolute POSIX paths only. Traversal is rejected here as a first line of defence; the
  * authoritative check is FilesystemService, which resolves against the allowed roots.
@@ -254,6 +312,7 @@ export const queuePayloadSchemas: QueuePayloadSchemas = {
     tagId: z.number().int().positive(),
     label: z.string().min(1),
     detachFromMedia: z.boolean(),
+    detachFromCollections: z.boolean(),
   }),
   'tag.merge': z.object({
     sourceTagIds: idList,
@@ -289,6 +348,10 @@ export const queuePayloadSchemas: QueuePayloadSchemas = {
     enabled: z.boolean(),
     enableAutomaticAdd: z.boolean(),
   }),
+  'collection.update': z.object({ collectionIds: idList, changes: collectionChangesSchema }),
+  'collectionTags.add': z.object({ collectionIds: idList, tagIds: tagIdList }),
+  'collectionTags.remove': z.object({ collectionIds: idList, tagIds: tagIdList }),
+  'collectionTags.set': z.object({ collectionIds: idList, tagIds: tagIdList }),
   'media.refresh': z.object({ mediaIds: z.array(z.number().int().positive()) }),
   'media.setMonitored': z.object({ mediaIds: idList, monitored: z.boolean() }),
   'media.setQualityProfile': z.object({
@@ -380,6 +443,11 @@ export function targetKindForOp(op: QueueOp, instanceKind: InstanceKind | null):
     case 'importList.delete':
     case 'importList.setEnabled':
       return 'importList';
+    case 'collection.update':
+    case 'collectionTags.add':
+    case 'collectionTags.remove':
+    case 'collectionTags.set':
+      return 'collection';
     case 'mediaTags.add':
     case 'mediaTags.remove':
     case 'mediaTags.set':
@@ -444,6 +512,20 @@ export function summariseQueueOp(item: NewQueueItem): string {
       return item.payload.mediaIds.length === 0
         ? 'Rescan the whole library'
         : `Rescan ${item.payload.mediaIds.length} item(s)`;
+    case 'collection.update':
+      return `${describeCollectionChanges(item.payload.changes)} on ${String(item.payload.collectionIds.length)} collection(s)`;
+    case 'collectionTags.add':
+      return item.payload.tagIds.length === 0
+        ? `Add the tag created in step ${item.dependsOnId ?? '?'} to ${String(item.payload.collectionIds.length)} collection(s)`
+        : `Add ${String(item.payload.tagIds.length)} tag(s) to ${String(item.payload.collectionIds.length)} collection(s)`;
+    case 'collectionTags.remove':
+      return item.payload.tagIds.length === 0
+        ? `Remove the tag from step ${item.dependsOnId ?? '?'} from ${String(item.payload.collectionIds.length)} collection(s)`
+        : `Remove ${String(item.payload.tagIds.length)} tag(s) from ${String(item.payload.collectionIds.length)} collection(s)`;
+    case 'collectionTags.set':
+      return item.payload.tagIds.length === 0
+        ? `Clear all tags on ${String(item.payload.collectionIds.length)} collection(s)`
+        : `Replace tags on ${String(item.payload.collectionIds.length)} collection(s) with ${String(item.payload.tagIds.length)} tag(s)`;
     case 'fs.mkdir':
       return `Create directory ${item.payload.path}`;
     case 'fs.rename':
@@ -453,6 +535,30 @@ export function summariseQueueOp(item: NewQueueItem): string {
     case 'fs.delete':
       return `Delete ${item.payload.path} from disk${item.payload.recursive ? ' (recursively)' : ''}`;
   }
+}
+
+/**
+ * The changed keys, named rather than counted - "Update 3 collection(s)" would not say
+ * whether the queue is about to re-point a folder or unmonitor the lot.
+ */
+function describeCollectionChanges(changes: CollectionChanges): string {
+  const parts: string[] = [];
+  if (changes.rootFolderPath !== undefined) parts.push(`re-aim at ${changes.rootFolderPath}`);
+  if (changes.qualityProfileId !== undefined) parts.push('change quality profile');
+  if (changes.minimumAvailability !== undefined)
+    parts.push(`set availability to ${changes.minimumAvailability}`);
+  if (changes.monitored !== undefined) parts.push(changes.monitored ? 'monitor' : 'unmonitor');
+  if (changes.monitorMovies !== undefined)
+    parts.push(changes.monitorMovies ? 'monitor their films' : 'unmonitor their films');
+  if (changes.searchOnAdd !== undefined)
+    parts.push(changes.searchOnAdd ? 'search on add' : 'stop searching on add');
+  // An empty `changes` is rejected by the stager, but a summary that reads "on 3
+  // collection(s)" with no verb would be worse than a dull one.
+  return parts.length === 0 ? 'Update' : capitalise(parts.join(', '));
+}
+
+function capitalise(value: string): string {
+  return value.length === 0 ? value : value[0]!.toUpperCase() + value.slice(1);
 }
 
 function basename(value: string): string {
@@ -475,6 +581,13 @@ export function affectedCountForOp(item: NewQueueItem): number {
     case 'media.setQualityProfile':
     case 'media.delete':
       return item.payload.mediaIds.length;
+    case 'collection.update':
+    case 'collectionTags.add':
+    case 'collectionTags.remove':
+    case 'collectionTags.set':
+      // The bulk editor touches N collections in one call and the tag ops touch N in N
+      // calls; this column counts remote objects, not HTTP requests.
+      return item.payload.collectionIds.length;
     case 'media.refresh':
       return Math.max(1, item.payload.mediaIds.length);
     case 'tag.merge':
@@ -545,6 +658,22 @@ export function describeQueueTarget(item: NewQueueItem): QueueTargetDescription 
       };
     case 'media.refresh':
       return { targetId: null, targetLabel: 'library rescan' };
+    case 'collection.update':
+    case 'collectionTags.add':
+    case 'collectionTags.remove':
+    case 'collectionTags.set':
+      // The same rule the media branch follows: one collection is worth addressing, a
+      // forty-collection label is not. No name is snapshotted - TMDB renames collections,
+      // and the instance's own snapshot already holds the current one.
+      return item.payload.collectionIds.length === 1
+        ? {
+            targetId: item.payload.collectionIds[0] ?? null,
+            targetLabel: `collection #${String(item.payload.collectionIds[0])}`,
+          }
+        : {
+            targetId: null,
+            targetLabel: `${String(item.payload.collectionIds.length)} collection(s)`,
+          };
     case 'fs.mkdir':
     case 'fs.delete':
       return { targetId: null, targetLabel: item.payload.path };

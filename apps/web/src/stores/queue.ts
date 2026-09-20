@@ -66,6 +66,28 @@ export interface FolderDeletionPlan {
     readonly instanceId: number;
     readonly importListId: number;
   }>;
+  /**
+   * Collections aimed here - unmonitored before the delete so none of them refills it.
+   *
+   * Unmonitor rather than delete: Radarr's API cannot delete a collection, so this is the
+   * reversible equivalent of disabling a list. Required and `[]` for the ordinary case,
+   * like the two above, so a caller that forgets cannot look like a folder nothing claims.
+   */
+  readonly disableCollections: ReadonlyArray<{
+    readonly instanceId: number;
+    readonly collectionIds: readonly number[];
+  }>;
+}
+
+/**
+ * Collections to aim at a new folder, grouped by the path they should fill instead.
+ *
+ * Grouped rather than one per collection: the Radarr collection editor takes a list, so
+ * every collection landing on the same path is a single queue item and a single call.
+ */
+export interface RemapCollectionTarget {
+  readonly collectionIds: readonly number[];
+  readonly toRootFolderPath: string;
 }
 
 /** One import list to aim at the new folder, with the path it should fill instead. */
@@ -89,6 +111,14 @@ export interface RemapTarget {
    * the media just left, one sync at a time - which is the switch quietly undoing itself.
    */
   readonly importLists?: readonly RemapListTarget[];
+  /**
+   * Collections rooted in the folder being left, and where each should point instead.
+   *
+   * Optional for the same reason `importLists` is - the `/media` mover stages no collection
+   * work - and undoing the switch in exactly the same way if left out: a monitored
+   * collection re-adds its films into the folder the media just left.
+   */
+  readonly collections?: readonly RemapCollectionTarget[];
 }
 
 export interface ImportListTarget {
@@ -166,6 +196,9 @@ function mediaIdsOf(item: QueueItem): readonly number[] {
     case 'media.setQualityProfile':
     case 'media.delete':
       return item.payload.mediaIds;
+    // The `collectionTags.*` and `collection.update` ops land here on purpose. Their
+    // `collectionIds` share a number space with movie ids, so returning them would paint a
+    // staged glyph on whatever film happens to hold the same id.
     default:
       return [];
   }
@@ -213,6 +246,21 @@ function stageKeysFor(item: QueueItem): string[] {
       return item.payload.tagIds.map((tagId) =>
         stageKey(item.instanceId, 'tag', `#${String(tagId)}`),
       );
+    case 'collection.update':
+      return item.payload.collectionIds.map((collectionId) =>
+        stageKey(item.instanceId, 'collection', String(collectionId)),
+      );
+    case 'collectionTags.add':
+    case 'collectionTags.remove':
+    case 'collectionTags.set':
+      // Both axes: the collection is what changed, and the tag cell in the matrix is where
+      // a pending change has to show - the same `#<tagId>` key `mediaTags.*` emits.
+      return [
+        ...item.payload.collectionIds.map((collectionId) =>
+          stageKey(item.instanceId, 'collection', String(collectionId)),
+        ),
+        ...item.payload.tagIds.map((tagId) => stageKey(item.instanceId, 'tag', `#${String(tagId)}`)),
+      ];
     // These name media ids, not fleet cells. Fanning this index out over thousands of them
     // would rebuild a map of concatenated strings on every queue change, for the benefit of
     // views that do not read it - `stagedMediaIntent` below answers the media question.
@@ -371,6 +419,9 @@ export const useQueueStore = defineStore('queue', () => {
   const stagedForImportListName = (instanceId: number, name: string): QueueItem[] =>
     stagedIndex.value.get(stageKey(instanceId, 'importList', name)) ?? [];
 
+  const stagedForCollection = (instanceId: number, collectionId: number): QueueItem[] =>
+    stagedIndex.value.get(stageKey(instanceId, 'collection', String(collectionId))) ?? [];
+
   /**
    * Staged work touching a path - drives the folder rows' pending glyph.
    *
@@ -477,12 +528,20 @@ export const useQueueStore = defineStore('queue', () => {
   function deleteTagAcross(
     targets: readonly TagTarget[],
     detachFromMedia: boolean,
+    // Detaching from collections is the same choice for a different endpoint, and it only
+    // ever does anything on a Radarr instance - the handler skips Sonarr outright.
+    detachFromCollections = detachFromMedia,
   ): Promise<QueueItem[]> {
     return push(
       targets.map((target) => ({
         instanceId: target.instanceId,
         op: 'tag.delete' as const,
-        payload: { tagId: target.tagId, label: target.label, detachFromMedia },
+        payload: {
+          tagId: target.tagId,
+          label: target.label,
+          detachFromMedia,
+          detachFromCollections,
+        },
       })),
       `deletion of "${targets[0]?.label ?? 'tag'}" on ${String(targets.length)} instance(s)`,
     );
@@ -653,6 +712,34 @@ export const useQueueStore = defineStore('queue', () => {
         );
       }
 
+      // Step 3b: aim the collections at the new folder, gated the same way and pushed
+      // BEFORE the removals below.
+      //
+      // Order is load-bearing and only POST order fixes it: this step and step 4 share
+      // `gate(target)` as their producer, and the executor never defers. It has to come
+      // after the create, because Radarr validates a collection's root folder against the
+      // registered ones; and before the delete, because a collection still aimed at a
+      // de-registered folder re-adds its films into the folder the media just left.
+      const recollections = targets.flatMap((target) =>
+        (target.collections ?? []).map((group) => ({ target, group })),
+      );
+      if (recollections.length > 0) {
+        await queueApi.push(
+          recollections.map(({ target, group }): NewQueueItem => {
+            const dependsOnId = gate(target);
+            return {
+              instanceId: target.instanceId,
+              op: 'collection.update',
+              payload: {
+                collectionIds: [...group.collectionIds],
+                changes: { rootFolderPath: group.toRootFolderPath },
+              },
+              ...(dependsOnId === undefined ? {} : { dependsOnId }),
+            };
+          }),
+        );
+      }
+
       // Step 4: optional cleanup of the old root folder, gated on its move succeeding.
       const removals = targets.filter((target) => target.removeRootFolderId !== null);
       if (removals.length > 0) {
@@ -758,6 +845,23 @@ export const useQueueStore = defineStore('queue', () => {
           dependsOnId = staged.items[0]?.id ?? dependsOnId;
         }
 
+        for (const target of plan.disableCollections) {
+          const staged = await queueApi.push([
+            {
+              instanceId: target.instanceId,
+              op: 'collection.update',
+              // All three flags for the same reason both list flags go together: Radarr
+              // cannot delete a collection, and one of these left on keeps it adding here.
+              payload: {
+                collectionIds: [...target.collectionIds],
+                changes: { monitored: false, monitorMovies: false, searchOnAdd: false },
+              },
+              ...(dependsOnId === undefined ? {} : { dependsOnId }),
+            },
+          ]);
+          dependsOnId = staged.items[0]?.id ?? dependsOnId;
+        }
+
         await queueApi.push([
           {
             op: 'fs.delete',
@@ -769,7 +873,10 @@ export const useQueueStore = defineStore('queue', () => {
 
       await load();
       const bridged = plans.filter(
-        (plan) => plan.unassign.length > 0 || plan.disableLists.length > 0,
+        (plan) =>
+          plan.unassign.length > 0 ||
+          plan.disableLists.length > 0 ||
+          plan.disableCollections.length > 0,
       ).length;
       ui.notify(
         'success',
@@ -802,6 +909,17 @@ export const useQueueStore = defineStore('queue', () => {
       toPath: string;
       mediaIds: readonly number[];
       oldRootFolderId: number | null;
+      /**
+       * Collections rooted at or under the folder being renamed, grouped by where each
+       * should point once the disk has moved.
+       *
+       * Grouped rather than a flat id list because a collection may root *deeper* than the
+       * root folder - `/data/movies/marvel` under a root at `/data/movies` - and pointing
+       * every one of them at the root would quietly re-home them all. Required, not
+       * optional: an omitted array in a re-point chain reads as "no collections" when it
+       * means "the caller forgot".
+       */
+      collections: readonly RemapCollectionTarget[];
     }>;
     removeOldRootFolder: boolean;
   }): Promise<void> {
@@ -848,6 +966,26 @@ export const useQueueStore = defineStore('queue', () => {
             },
           ]);
           realignId = realigned.items[0]?.id ?? rootFolderId;
+        }
+
+        // Step 3b: re-aim the collections, on the same gate and before the drop below.
+        //
+        // No moveFiles question to answer here: the collection editor never moves bytes,
+        // and the bytes already moved in step 1. Unlike step 3 this does not skip when the
+        // instance has no media - a collection aimed at a folder can outlive every film in
+        // it, and is exactly what would refill the old name.
+        for (const group of target.collections) {
+          await queueApi.push([
+            {
+              instanceId: target.instanceId,
+              op: 'collection.update',
+              payload: {
+                collectionIds: [...group.collectionIds],
+                changes: { rootFolderPath: group.toRootFolderPath },
+              },
+              dependsOnId: realignId,
+            },
+          ]);
         }
 
         // Step 4: drop the old root folder, only if its move succeeded.
@@ -1340,6 +1478,7 @@ export const useQueueStore = defineStore('queue', () => {
     stagedForRootFolder,
     stagedForImportList,
     stagedForImportListName,
+    stagedForCollection,
     stagedForPath,
     runProgress,
     currentItem,

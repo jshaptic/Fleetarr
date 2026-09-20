@@ -60,6 +60,8 @@ function owner(instanceId: number, overrides: Record<string, unknown> = {}) {
     title: null,
     rootFoldersUnder: [],
     importLists: [],
+    collections: [],
+    collectionsKnown: true,
     freeSpace: null,
     totalSpace: null,
     ...overrides,
@@ -164,6 +166,7 @@ vi.mock('@/api/resources', () => ({
         rootFolders: [{ id: 41, path: FROM }],
         importLists: [],
         qualityProfiles: [],
+        collections: [],
       }),
     ),
     media: vi.fn(),
@@ -394,6 +397,65 @@ describe('RemapDialog', () => {
     expect(updates[1]).toMatchObject({
       payload: { importListId: 8, changes: { rootFolderPath: '/data/media/4k/anime' } },
     });
+    wrapper.unmount();
+  });
+
+  it('re-aims the collections rooted here, grouped by where each lands', async () => {
+    levelNodes.null = [
+      node(FROM, {
+        flags: ['rootFolder'],
+        owners: [
+          owner(1, {
+            collections: [
+              { id: 1, title: 'Dune', monitored: true, searchOnAdd: true, path: FROM },
+              { id: 2, title: 'Bond', monitored: true, searchOnAdd: false, path: FROM },
+              // Rooted below, so it keeps its own subfolder.
+              { id: 3, title: 'Marvel', monitored: false, searchOnAdd: false, path: `${FROM}/marvel` },
+            ],
+          }),
+        ],
+      }),
+    ];
+    const wrapper = await mountDialog();
+    await destination('/data/media/4k');
+
+    expect(find('stranded-collections')?.textContent).toContain('Dune');
+
+    find('switch-confirm')?.click();
+    for (let tick = 0; tick < 10; tick += 1) await flushPromises();
+
+    const updates = push.mock.calls
+      .flatMap((call) => call[0])
+      .filter((item) => item.op === 'collection.update');
+
+    // Two calls, not three: the two landing on the same folder are one editor call.
+    expect(updates).toHaveLength(2);
+    expect(updates[0]).toMatchObject({
+      instanceId: 1,
+      payload: { collectionIds: [1, 2], changes: { rootFolderPath: '/data/media/4k' } },
+    });
+    expect(updates[1]).toMatchObject({
+      payload: { collectionIds: [3], changes: { rootFolderPath: '/data/media/4k/marvel' } },
+    });
+
+    // And before the old root folder is dropped, or it would re-add into the folder the
+    // media just left.
+    const ops = push.mock.calls.flatMap((call) => call[0]).map((item) => item.op);
+    expect(ops.indexOf('collection.update')).toBeLessThan(ops.indexOf('rootFolder.delete'));
+    wrapper.unmount();
+  });
+
+  it('says which instances could not report their collections rather than showing none', async () => {
+    levelNodes.null = [
+      node(FROM, {
+        flags: ['rootFolder'],
+        owners: [owner(1, { collections: [], collectionsKnown: false })],
+      }),
+    ];
+    const wrapper = await mountDialog();
+    await destination('/data/media/4k');
+
+    expect(find('collections-unknown')?.textContent).toContain('Radarr-1');
     wrapper.unmount();
   });
 

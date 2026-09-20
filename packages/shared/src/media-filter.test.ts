@@ -44,6 +44,7 @@ function movieRow(overrides: Partial<MediaFilterRow> = {}): MediaFilterRow {
     certification: 'PG-13',
     runtime: 155,
     studio: 'Legendary Pictures',
+    collection: 'Dune Collection',
     tmdbId: 438631,
     tvdbId: null,
     imdbId: 'tt1160419',
@@ -70,6 +71,7 @@ function seriesRow(overrides: Partial<MediaFilterRow> = {}): MediaFilterRow {
     titleSlug: 'shogun',
     seriesType: 'standard',
     minimumAvailability: null,
+    collection: null,
     facets: [facet({ instanceId: 2, name: 'sonarr-tv', kind: 'sonarr', lists: null, excludedFromLists: null })],
     unknownInstanceIds: [],
     ...overrides,
@@ -512,6 +514,21 @@ describe('unknown is not no', () => {
     assert.equal(verdict('tvdb:121361', movieRow()), 'no');
     assert.equal(verdict('minAvail:none', seriesRow()), 'match');
     assert.equal(verdict('minAvail:released', seriesRow()), 'no');
+
+    // A series has no TMDB collection ever - so this is `none`, never `unknown`, even
+    // though Sonarr is the app that cannot answer it. The entity decides, not the app.
+    assert.equal(verdict('collection:"Dune Collection"', seriesRow()), 'no');
+    assert.equal(verdict('collection:none', seriesRow()), 'match');
+  });
+
+  test('collection matches exactly, globs, and reads none for a standalone film', () => {
+    assert.equal(verdict('collection:"Dune Collection"', movieRow()), 'match');
+    assert.equal(verdict('collection:*Dune*', movieRow()), 'match');
+    assert.equal(verdict('coll:"Dune Collection"', movieRow()), 'match');
+    assert.equal(verdict('collection:"Bond Collection"', movieRow()), 'no');
+    // A film in no collection is a known absence, exactly like a film with no certification.
+    assert.equal(verdict('collection:none', movieRow({ collection: null })), 'match');
+    assert.equal(verdict('collection:*', movieRow({ collection: null })), 'no');
   });
 
   test('an incomplete set of copies cannot honestly answer no', () => {

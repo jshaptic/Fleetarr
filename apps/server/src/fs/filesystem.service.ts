@@ -654,6 +654,7 @@ export class FilesystemService {
     }
 
     checks.push(this.importListCheck(references, assumeResolved, waive));
+    checks.push(this.collectionCheck(references, assumeResolved, waive));
 
     if (!references.complete) {
       // Fail safe: an unchecked instance is not a cleared one. No `assumeResolved` - a
@@ -718,6 +719,57 @@ export class FilesystemService {
       );
     }
     return ok('import_list_under', 'No import list adds media at or under this path');
+  }
+
+  /**
+   * A Radarr collection is graded by what it does unattended, exactly as a list is.
+   *
+   * `monitored` is the collection's `automatic`: Radarr re-adds the collection's films
+   * into this folder on its next sync, so it refuses. `searchOnAdd` alone changes nothing
+   * until something is monitored again - worth saying, not worth refusing over. A
+   * collection that is neither is not a finding at all.
+   *
+   * The bridge unmonitors rather than deletes, because Radarr's API cannot delete a
+   * collection: it is TMDB's, not the instance's.
+   */
+  private collectionCheck(
+    references: PathReferences,
+    assumeResolved: FsAssumeResolved,
+    waive: (id: string, fact: string, remedy: string, resolved: boolean) => FsCheck,
+  ): FsCheck {
+    const collections = references.instances.flatMap((reference) => reference.collections);
+    const aimed = collections.filter((entry) => entry.monitored || entry.searchOnAdd);
+    const monitored = collections.filter((entry) => entry.monitored);
+
+    // The bridge unmonitors every aimed collection, not only the monitored ones, so it
+    // clears the warning below along with the blocker above - one checkbox, one verdict.
+    if (assumeResolved.collections === true && aimed.length > 0) {
+      return warning(
+        'collection_under',
+        `${String(aimed.length)} collection(s) add to this path - cleared by a staged operation ahead of the delete`,
+      );
+    }
+    if (monitored.length > 0) {
+      return waive(
+        'collection_under',
+        `${String(monitored.length)} monitored collection(s) add to this path and will recreate this folder`,
+        'unmonitor them',
+        false,
+      );
+    }
+    if (aimed.length > 0) {
+      return warning(
+        'collection_under',
+        `${String(aimed.length)} collection(s) target this path and will search here the moment one is monitored again - nothing refills it unattended, but the collection is left aimed at a folder that is gone`,
+      );
+    }
+    if (collections.length > 0) {
+      return ok(
+        'collection_under',
+        `${String(collections.length)} collection(s) target this path, none monitored`,
+      );
+    }
+    return ok('collection_under', 'No collection adds media at or under this path');
   }
 
   private sourceChecks(target: string, stats: PathStats): FsCheck[] {
@@ -831,12 +883,13 @@ function blockerCode(checkId: string): string {
       return 'fs_exists';
     case 'recursive_required':
       return 'fs_not_empty';
-    // One code for all four: the split exists so the *message* names the reason, but the
+    // One code for all five: the split exists so the *message* names the reason, but the
     // HTTP contract stays as it was - nothing in the web app branches on this code.
     case 'referenced_by_arr':
     case 'root_folder_under':
     case 'media_under':
     case 'import_list_under':
+    case 'collection_under':
     case 'references_unknown':
       return 'fs_referenced_by_arr';
     case 'not_symlink':

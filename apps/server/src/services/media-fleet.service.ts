@@ -581,6 +581,14 @@ function toRow(draft: RowDraft, unknownInstanceIds: readonly number[]): MediaRow
     certification: item.certification ?? null,
     runtime: item.runtime ?? null,
     studio: item.studio ?? item.network ?? null,
+    // Read off the film itself rather than joined to the `/collection` resource: TMDB is
+    // the source either way, so two Radarr copies agree by construction, and the column
+    // keeps working on a Radarr too old to have that endpoint. An empty title is no
+    // collection - Radarr never sends a half-filled one, but `''` would render as a chip.
+    collection:
+      item.collection?.title !== undefined && item.collection.title.length > 0
+        ? item.collection.title
+        : null,
     tmdbId: item.tmdbId ?? null,
     tvdbId: item.tvdbId ?? null,
     imdbId: item.imdbId ?? null,
@@ -668,6 +676,15 @@ function buildVocabulary(indexes: readonly InstanceMediaIndex[]): MediaFilterVoc
       indexes.flatMap((index) =>
         index.items
           .map((item) => item.certification)
+          .filter((value): value is string => value !== undefined && value.length > 0),
+      ),
+    ),
+    // The fleet's own collections, from the library rather than from `/collection` - the
+    // same source the column reads, so the help card can never offer a value no row has.
+    collections: sorted(
+      indexes.flatMap((index) =>
+        index.items
+          .map((item) => item.collection?.title)
           .filter((value): value is string => value !== undefined && value.length > 0),
       ),
     ),

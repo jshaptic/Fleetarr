@@ -91,6 +91,14 @@ export interface MediaFilterRow {
   readonly certification: string | null;
   readonly runtime: number | null;
   readonly studio: string | null;
+  /**
+   * The TMDB collection this title belongs to.
+   *
+   * Row scope, not facet: the collection comes from TMDB, so two Radarr instances holding
+   * the same film agree on it by construction. Null on a series - a known absence, which
+   * is why the field declares `entities: ['movie']` rather than `answerableOn`.
+   */
+  readonly collection: string | null;
   readonly tmdbId: number | null;
   readonly tvdbId: number | null;
   readonly imdbId: string | null;
@@ -164,6 +172,7 @@ export interface MediaFilterVocabulary {
   readonly genres: readonly string[];
   readonly certifications: readonly string[];
   readonly rootFolders: readonly string[];
+  readonly collections: readonly string[];
 }
 
 export interface MediaFieldDef {
@@ -267,6 +276,19 @@ export const MEDIA_FILTER_FIELDS: readonly MediaFieldDef[] = [
     vocabulary: 'certifications',
     describe: 'age rating; a one-value set, so certification:{PG,PG-13} works',
     read: (row) => setValue(row.certification === null ? [] : [row.certification]),
+  },
+  {
+    name: 'collection',
+    aliases: ['coll'],
+    type: 'set',
+    scope: 'row',
+    entities: ['movie'],
+    vocabulary: 'collections',
+    // `entities`, never `answerableOn`: a series has no collection *ever*, so
+    // `collection:none` on one is true rather than unanswerable. Radarr reports it inline
+    // on the film, so even a Radarr too old for `/collection` can still answer this.
+    describe: 'the TMDB collection, exactly (glob it: collection:*Matrix*)',
+    read: (row) => setValue(row.collection === null ? [] : [row.collection]),
   },
   {
     name: 'runtime',

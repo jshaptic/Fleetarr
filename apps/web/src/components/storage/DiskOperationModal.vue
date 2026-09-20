@@ -9,14 +9,16 @@ import { formatBytes } from '@/lib/format';
 import { type AlignTarget } from '@/lib/path-matrix';
 import {
   assumeResolved,
+  disableCollectionTargets,
   disableListTargets,
   needsForce as forceStillNeeded,
+  needsCollectionBridge,
   needsImportListBridge,
   needsRootFolderBridge,
   unassignTargets,
 } from '@/lib/delete-bridge';
 import { usePathsStore } from '@/stores/paths';
-import { useQueueStore } from '@/stores/queue';
+import { useQueueStore, type RemapCollectionTarget } from '@/stores/queue';
 import IconCheck from '@/components/base/icons/IconCheck.vue';
 import IconError from '@/components/base/icons/IconError.vue';
 import IconWarning from '@/components/base/icons/IconWarning.vue';
@@ -91,6 +93,7 @@ const force = ref(false);
  */
 const bridgeRoots = ref(true);
 const bridgeLists = ref(false);
+const bridgeCollections = ref(false);
 const confirmation = ref('');
 
 const preflight = ref<FsPreflight | null>(null);
@@ -169,10 +172,23 @@ const needsRecursive = computed(
  */
 const canUnassign = computed(() => needsRootFolderBridge(preflight.value));
 const canDisableLists = computed(() => needsImportListBridge(preflight.value));
+const canDisableCollections = computed(() => needsCollectionBridge(preflight.value));
 const needsForce = computed(() => forceStillNeeded(preflight.value));
 
 const unassign = computed(() => unassignTargets(preflight.value));
 const disableLists = computed(() => disableListTargets(preflight.value));
+const disableCollections = computed(() => disableCollectionTargets(preflight.value));
+
+/**
+ * Instances that could not say what collections they hold.
+ *
+ * Stated above the plan rather than left out: an absent line reads as "there were none",
+ * and a rename that silently re-points nothing is how a collection ends up aimed at a
+ * folder that no longer exists.
+ */
+const collectionsUnknownOn = computed(() =>
+  props.alignTargets.filter((entry) => !entry.collectionsKnown).map((entry) => entry.name),
+);
 
 // A hidden option must not keep a `true` in the payload it no longer explains. Guarded so the
 // write cannot re-trigger the watch that produced the verdict in the first place.
@@ -204,6 +220,43 @@ function idsFor(instanceId: number, path: string): readonly number[] {
 
 function idsForTarget(entry: AlignTarget): readonly number[] {
   return entry.roots.flatMap((root) => [...idsFor(entry.instanceId, root.path)]);
+}
+
+/**
+ * The collections this (instance, root folder) pair owns, grouped by where each lands.
+ *
+ * Assigned to the *nearest* enclosing root the instance has here, so a collection is
+ * re-pointed exactly once even when the folder being renamed holds several roots. Each
+ * keeps its own path through `rewritePathPrefix`, so one rooted deeper than the root
+ * folder lands deeper too rather than being flattened onto it.
+ */
+function collectionsFor(
+  entry: AlignTarget,
+  rootPath: string,
+  from: string,
+  to: string,
+): RemapCollectionTarget[] {
+  const nearest = (candidate: string): string | null => {
+    const owning = entry.roots
+      .map((root) => root.path)
+      .filter((path) => candidate === path || candidate.startsWith(`${path}/`))
+      .sort((a, b) => b.length - a.length);
+    return owning[0] ?? null;
+  };
+
+  const byDestination = new Map<string, number[]>();
+  for (const collection of entry.collections) {
+    if (nearest(collection.path) !== rootPath) continue;
+    const destination = rewritePathPrefix(collection.path, from, to);
+    const group = byDestination.get(destination);
+    if (group === undefined) byDestination.set(destination, [collection.id]);
+    else group.push(collection.id);
+  }
+
+  return [...byDestination].map(([toRootFolderPath, collectionIds]) => ({
+    toRootFolderPath,
+    collectionIds,
+  }));
 }
 
 function destinationPath(): string | null {
@@ -316,7 +369,11 @@ async function check(): Promise<void> {
       candidate.op as FsOp,
       candidate.payload,
       candidate.op === 'fs.delete'
-        ? assumeResolved(bridgeRoots.value, bridgeLists.value)
+        ? assumeResolved({
+            rootFolders: bridgeRoots.value,
+            importLists: bridgeLists.value,
+            collections: bridgeCollections.value,
+          })
         : undefined,
     );
   } catch (error) {
@@ -358,6 +415,7 @@ async function stage(): Promise<void> {
           toPath: rewritePathPrefix(root.path, candidate.payload.from, candidate.payload.to),
           mediaIds: idsFor(entry.instanceId, root.path),
           oldRootFolderId: root.rootFolderId,
+          collections: collectionsFor(entry, root.path, candidate.payload.from, candidate.payload.to),
         })),
       ),
     });
@@ -381,6 +439,12 @@ async function stage(): Promise<void> {
           ? disableLists.value.map((target) => ({
               instanceId: target.instanceId,
               importListId: target.importListId,
+            }))
+          : [],
+        disableCollections: bridgeCollections.value
+          ? disableCollections.value.map((target) => ({
+              instanceId: target.instanceId,
+              collectionIds: target.collectionIds,
             }))
           : [],
       },
@@ -411,7 +475,10 @@ onMounted(() => {
   }
 });
 
-watch([name, destination, recursive, force, bridgeRoots, bridgeLists], () => void check());
+watch(
+  [name, destination, recursive, force, bridgeRoots, bridgeLists, bridgeCollections],
+  () => void check(),
+);
 </script>
 
 <template>
@@ -537,6 +604,29 @@ watch([name, destination, recursive, force, bridgeRoots, bridgeLists], () => voi
             </span>
           </span>
         </label>
+        <label v-if="canDisableCollections" class="flex items-start gap-2 text-xs text-muted">
+          <BaseCheckbox
+            v-model="bridgeCollections"
+            data-testid="delete-disable-collections"
+            class="mt-0.5"
+          />
+          <span>
+            <span class="font-medium text-ink">
+              Also unmonitor
+              {{ disableCollections.reduce((sum, target) => sum + target.collectionIds.length, 0) }}
+              collection(s) first
+            </span>
+            <span class="block text-[11px]">
+              {{
+                disableCollections
+                  .flatMap((target) => target.titles.map((title) => `${title} on ${target.instanceName}`))
+                  .join(', ')
+              }}
+              - Radarr cannot delete a collection, so unmonitoring is what stops it rebuilding
+              this folder.
+            </span>
+          </span>
+        </label>
         <label v-if="needsForce" class="flex items-start gap-2 text-xs text-muted">
           <BaseCheckbox v-model="force" data-testid="delete-force" tone="danger" class="mt-0.5" />
           <span>
@@ -588,6 +678,9 @@ watch([name, destination, recursive, force, bridgeRoots, bridgeLists], () => voi
                   <span v-if="entry.roots.length > 1 || entry.roots[0]?.path !== props.target">
                     · {{ entry.roots.length }} root folder(s)
                   </span>
+                  <span v-if="entry.collections.length > 0">
+                    · {{ entry.collections.length }} collection(s)
+                  </span>
                 </template>
               </span>
             </label>
@@ -599,6 +692,20 @@ watch([name, destination, recursive, force, bridgeRoots, bridgeLists], () => voi
             </ul>
           </li>
         </ul>
+
+        <!--
+          Stated once, never a silent zero: an instance that did not report its collections
+          has some that will be left aimed at the old name, and an absent line here reads
+          as "there were none".
+        -->
+        <p
+          v-if="collectionsUnknownOn.length > 0"
+          class="text-[11px] text-drift"
+          data-testid="align-collections-unknown"
+        >
+          {{ collectionsUnknownOn.join(', ') }} did not report their collections - none of
+          theirs are being re-aimed.
+        </p>
 
         <div class="space-y-2 rounded-md border border-line bg-raised/40 px-3 py-2.5 text-xs">
           <label class="flex items-start gap-2">

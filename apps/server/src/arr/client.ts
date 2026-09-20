@@ -1,4 +1,5 @@
 import {
+  arrCollectionSchema,
   arrCommandSchema,
   arrImportListMovieSchema,
   arrImportListSchema,
@@ -11,6 +12,7 @@ import {
   mergeForPut,
   toResource,
   toResources,
+  type ArrCollection,
   type ArrCommand,
   type ArrImportList,
   type ArrImportListMovie,
@@ -80,6 +82,23 @@ export interface BulkEditParams {
   readonly moveFiles?: boolean;
   readonly monitored?: boolean;
   readonly qualityProfileId?: number;
+}
+
+/**
+ * The Radarr collection editor's body, minus the id list.
+ *
+ * No `tags` key, and none is possible: `PUT /collection` has no `tags` and no `applyTags`,
+ * so a collection's tags are reachable only through the single-resource PUT. That is what
+ * splits `collection.update` from `collectionTags.*`, not a preference.
+ */
+export interface BulkEditCollectionParams {
+  readonly collectionIds: readonly number[];
+  readonly rootFolderPath?: string;
+  readonly qualityProfileId?: number;
+  readonly minimumAvailability?: string;
+  readonly monitored?: boolean;
+  readonly monitorMovies?: boolean;
+  readonly searchOnAdd?: boolean;
 }
 
 export interface BulkDeleteParams {
@@ -380,6 +399,71 @@ export class ArrClient {
 
   async deleteImportList(importListId: number): Promise<void> {
     await this.request<void>({ method: 'DELETE', path: `/importlist/${importListId}` });
+  }
+
+  // ------------------------------------------------------------------ collections
+
+  /**
+   * **Radarr only.** Sonarr has no collections, so asking a Sonarr client is a bug rather
+   * than a question with an empty answer - the same rule `listImportListMovies` follows.
+   *
+   * A Radarr older than v4 answers 404 here. That is *not* caught: the caller decides
+   * whether a missing endpoint means unknown, because only it knows whether an unknown is
+   * survivable, and swallowing it here would make a timeout look like an empty fleet.
+   */
+  async listCollections(): Promise<ArrResource<ArrCollection>[]> {
+    this.requireCollections();
+    return toResources(arrCollectionSchema, await this.request<unknown>({ path: '/collection' }));
+  }
+
+  async getCollection(collectionId: number): Promise<ArrResource<ArrCollection>> {
+    this.requireCollections();
+    return toResource(
+      arrCollectionSchema,
+      await this.request<unknown>({ path: `/collection/${String(collectionId)}` }),
+    );
+  }
+
+  /** Takes the full merged body - see mergeForPut. The only way to write a collection's tags. */
+  async putCollection(collectionId: number, body: ArrJson): Promise<ArrResource<ArrCollection>> {
+    this.requireCollections();
+    const response = await this.request<unknown>({
+      method: 'PUT',
+      path: `/collection/${String(collectionId)}`,
+      body,
+    });
+    return toResource(arrCollectionSchema, response ?? body);
+  }
+
+  /**
+   * PUT /collection - the collection editor.
+   *
+   * Partial by design, exactly like `/{movie,series}/editor`: only the keys present in the
+   * body are touched, so this is one of the two endpoints the merge-before-PUT rule does
+   * not apply to. Merging a whole collection resource in would be meaningless - the
+   * endpoint has no field to receive one.
+   */
+  async bulkEditCollections(params: BulkEditCollectionParams): Promise<number> {
+    this.requireCollections();
+    if (params.collectionIds.length === 0) return 0;
+
+    const body: ArrJson = { collectionIds: [...params.collectionIds] };
+    if (params.rootFolderPath !== undefined) body['rootFolderPath'] = params.rootFolderPath;
+    if (params.qualityProfileId !== undefined) body['qualityProfileId'] = params.qualityProfileId;
+    if (params.minimumAvailability !== undefined)
+      body['minimumAvailability'] = params.minimumAvailability;
+    if (params.monitored !== undefined) body['monitored'] = params.monitored;
+    if (params.monitorMovies !== undefined) body['monitorMovies'] = params.monitorMovies;
+    if (params.searchOnAdd !== undefined) body['searchOnAdd'] = params.searchOnAdd;
+
+    const response = await this.request<unknown>({ method: 'PUT', path: '/collection', body });
+    return Array.isArray(response) ? response.length : params.collectionIds.length;
+  }
+
+  private requireCollections(): void {
+    if (this.mediaKind !== 'movie') {
+      throw new ValidationError('collections are only available on Radarr');
+    }
   }
 
   // -------------------------------------------------------------------- commands

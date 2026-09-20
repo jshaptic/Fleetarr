@@ -299,6 +299,7 @@ describe('fleet fan-out', () => {
           toPath: '/data/media/movies/european/auto-feed/0k',
           mediaIds: [10, 11],
           oldRootFolderId: 8,
+          collections: [],
         },
         {
           instanceId: 1,
@@ -306,6 +307,7 @@ describe('fleet fan-out', () => {
           toPath: '/data/media/movies/european/curated-feed/0k',
           mediaIds: [12],
           oldRootFolderId: 9,
+          collections: [],
         },
       ],
     });
@@ -357,6 +359,7 @@ describe('stageFolderDeletions', () => {
           { instanceId: 2, rootFolderId: 6, path: '/data/media/spare/tv' },
         ],
         disableLists: [{ instanceId: 2, importListId: 9 }],
+        disableCollections: [],
       },
     ]);
 
@@ -386,17 +389,103 @@ describe('stageFolderDeletions', () => {
     });
   });
 
+  it('re-aims collections after the root folder exists and before the old one is dropped', async () => {
+    // Order is the whole point. Radarr validates a collection's root folder against the
+    // registered ones, so the create has to come first; and a collection still aimed at a
+    // de-registered folder re-adds its films into the folder the media just left, so the
+    // delete has to come last. The executor never defers, so only POST order fixes this.
+    const queue = useQueueStore();
+
+    await queue.stageReconcile({
+      from: '/data/media/movies',
+      to: '/data/media/films',
+      removeOldRootFolder: true,
+      targets: [
+        {
+          instanceId: 1,
+          fromPath: '/data/media/movies',
+          toPath: '/data/media/films',
+          mediaIds: [10],
+          oldRootFolderId: 8,
+          collections: [
+            { collectionIds: [1, 2], toRootFolderPath: '/data/media/films' },
+            // Rooted deeper than the root folder, and it stays deeper - pointing it at the
+            // root would quietly re-home everything the collection adds.
+            { collectionIds: [3], toRootFolderPath: '/data/media/films/marvel' },
+          ],
+        },
+      ],
+    });
+
+    const ops = push.mock.calls.map((call) => call[0]?.[0]).filter((entry) => entry !== undefined);
+    expect(ops.map((entry) => entry.op)).toEqual([
+      'fs.rename',
+      'rootFolder.create',
+      'media.moveRootFolder',
+      'collection.update',
+      'collection.update',
+      'rootFolder.delete',
+    ]);
+    expect(ops[3]).toMatchObject({
+      instanceId: 1,
+      op: 'collection.update',
+      payload: { collectionIds: [1, 2], changes: { rootFolderPath: '/data/media/films' } },
+    });
+    expect(ops[4]?.payload).toMatchObject({
+      collectionIds: [3],
+      changes: { rootFolderPath: '/data/media/films/marvel' },
+    });
+    // All three hang off the realignment, which is the third item staged.
+    expect(ops[3]?.dependsOnId).toBe(3);
+    expect(ops[4]?.dependsOnId).toBe(3);
+    expect(ops[5]?.dependsOnId).toBe(3);
+  });
+
   it('is one lone fs.delete when nothing claims the folder', async () => {
     const queue = useQueueStore();
 
     await queue.stageFolderDeletions([
-      { path: '/data/media/spare', recursive: false, force: false, unassign: [], disableLists: [] },
+      { path: '/data/media/spare', recursive: false, force: false, unassign: [], disableLists: [], disableCollections: [] },
     ]);
 
     const ops = push.mock.calls.flatMap((call) => call[0]);
     expect(ops).toEqual([
       { op: 'fs.delete', payload: { path: '/data/media/spare', recursive: false, force: false } },
     ]);
+  });
+
+  it('unmonitors the collections last, so the delete depends on them', async () => {
+    const queue = useQueueStore();
+
+    await queue.stageFolderDeletions([
+      {
+        path: '/data/media/movies',
+        recursive: true,
+        force: false,
+        unassign: [{ instanceId: 1, rootFolderId: 5, path: '/data/media/movies' }],
+        disableLists: [{ instanceId: 1, importListId: 7 }],
+        disableCollections: [{ instanceId: 1, collectionIds: [1, 2] }],
+      },
+    ]);
+
+    const ops = push.mock.calls.map((call) => call[0]?.[0]).filter((entry) => entry !== undefined);
+    expect(ops.map((entry) => entry.op)).toEqual([
+      'rootFolder.delete',
+      'importList.setEnabled',
+      'collection.update',
+      'fs.delete',
+    ]);
+    // All three flags together, for the same reason both list flags go together: any one
+    // of them left on keeps the collection adding into the folder being removed.
+    expect(ops[2]).toMatchObject({
+      instanceId: 1,
+      payload: {
+        collectionIds: [1, 2],
+        changes: { monitored: false, monitorMovies: false, searchOnAdd: false },
+      },
+    });
+    // The delete waits on the unmonitor, not on the list step before it.
+    expect(ops[3]?.dependsOnId).toBe(3);
   });
 
   it('keeps folders independent, so one bad chain cannot take the others with it', async () => {
@@ -409,8 +498,9 @@ describe('stageFolderDeletions', () => {
         force: false,
         unassign: [{ instanceId: 1, rootFolderId: 5, path: '/data/a' }],
         disableLists: [],
+        disableCollections: [],
       },
-      { path: '/data/b', recursive: false, force: false, unassign: [], disableLists: [] },
+      { path: '/data/b', recursive: false, force: false, unassign: [], disableLists: [], disableCollections: [] },
     ]);
 
     const ops = push.mock.calls.flatMap((call) => call[0]);

@@ -8,7 +8,7 @@ import {
   type InstanceWithKey,
   type QueueItemOf,
 } from '@fleetarr/shared';
-import type { ArrClient } from '../arr/client.js';
+import type { ApplyTagsMode, ArrClient } from '../arr/client.js';
 import type { FilesystemService } from '../fs/filesystem.service.js';
 import { ValidationError } from '../lib/errors.js';
 
@@ -125,6 +125,8 @@ export const arrHandlers: ArrQueueHandlers = {
     const tagId = resolveTagId(item.payload.tagId, ctx.dependencyResult);
     let detached = 0;
 
+    let detachedCollections = 0;
+
     if (item.payload.detachFromMedia) {
       // *Arr detaches the tag implicitly on delete; doing it explicitly first means the
       // audit trail records exactly how many items were touched.
@@ -136,14 +138,44 @@ export const arrHandlers: ArrQueueHandlers = {
       }
     }
 
+    // Collections are not in `/tag/detail`, so the count comes from the collections
+    // themselves. Same reason as above - Radarr drops the tag either way, and the point is
+    // that the trail says how much was carrying it.
+    if (item.payload.detachFromCollections && ctx.instance.kind === 'radarr') {
+      const collections = await ctx.client.listCollections();
+      for (const entry of collections) {
+        if (!entry.view.tags.includes(tagId)) continue;
+        await ctx.client.putCollection(
+          entry.view.id,
+          mergeForPut(entry.raw, { tags: entry.view.tags.filter((id) => id !== tagId) }),
+        );
+        detachedCollections += 1;
+      }
+      if (detachedCollections > 0) {
+        ctx.log('info', `Removed tag #${tagId} from ${detachedCollections} collection(s)`);
+      }
+    }
+
     await ctx.client.deleteTag(tagId);
     ctx.log('info', `Deleted tag "${item.payload.label}" (#${tagId})`);
-    return { tagId, detached };
+    return { tagId, detached, detachedCollections };
   },
 
   'tag.merge': async (ctx, item) => {
     const { sourceTagIds, targetTagId, deleteSources } = item.payload;
     let moved = 0;
+    let movedCollections = 0;
+
+    // Collections carry tags too, and `/tag/detail` does not report them - so without this
+    // read a merge moves every film and silently drops the association on the collections,
+    // which is the half of the tag the fleet actually curates by hand.
+    //
+    // Held as mutable state rather than re-read per source tag: one collection may carry
+    // several of them, and each PUT is a full replace, so the *next* one has to merge onto
+    // the body this loop just wrote or it would resurrect the tag it had already removed.
+    const collections = (
+      ctx.instance.kind === 'radarr' ? await ctx.client.listCollections() : []
+    ).map((entry) => ({ id: entry.view.id, raw: entry.raw, tags: [...entry.view.tags] }));
 
     for (const sourceTagId of sourceTagIds) {
       if (sourceTagId === targetTagId) continue;
@@ -157,6 +189,20 @@ export const arrHandlers: ArrQueueHandlers = {
         ctx.log('info', `Moved ${mediaIds.length} item(s) from tag #${sourceTagId} to #${targetTagId}`);
       }
 
+      for (const entry of collections) {
+        if (!entry.tags.includes(sourceTagId)) continue;
+        const next = new Set(entry.tags);
+        next.add(targetTagId);
+        // The source tag is left in place when the sources survive - the merge then adds
+        // the target without claiming the old one is gone, exactly as the media half does.
+        if (deleteSources) next.delete(sourceTagId);
+        const tags = [...next];
+        const updated = await ctx.client.putCollection(entry.id, mergeForPut(entry.raw, { tags }));
+        entry.raw = updated.raw;
+        entry.tags = tags;
+        movedCollections += 1;
+      }
+
       if (deleteSources) {
         await ctx.client.deleteTag(sourceTagId);
         ctx.log('info', `Deleted merged tag #${sourceTagId}`);
@@ -165,7 +211,10 @@ export const arrHandlers: ArrQueueHandlers = {
       }
     }
 
-    return { targetTagId, movedItems: moved, mergedTags: sourceTagIds.length };
+    if (movedCollections > 0) {
+      ctx.log('info', `Moved ${String(movedCollections)} collection(s) onto tag #${targetTagId}`);
+    }
+    return { targetTagId, movedItems: moved, movedCollections, mergedTags: sourceTagIds.length };
   },
 
   /**
@@ -371,7 +420,78 @@ export const arrHandlers: ArrQueueHandlers = {
     );
     return { importListId: updated.view.id, applied: Object.keys(patch) };
   },
+
+  /**
+   * Radarr's collection editor. Partial by design, like `/movie/editor`, so no merge.
+   *
+   * One call for every collection named - which is what makes this the right op for a
+   * root-folder remap, where every collection under the old folder moves together.
+   */
+  'collection.update': async (ctx, item) => {
+    const { collectionIds, changes } = item.payload;
+    if (Object.keys(changes).length === 0) {
+      throw new ValidationError('collection.update was staged with no changes');
+    }
+    const updated = await ctx.client.bulkEditCollections({ collectionIds, ...changes });
+    ctx.log(
+      'info',
+      `Updated ${String(updated)} collection(s): ${Object.keys(changes).join(', ')}`,
+    );
+    return { updated, applied: Object.keys(changes) };
+  },
+
+  'collectionTags.add': async (ctx, item) => applyCollectionTags(ctx, item, 'add'),
+  'collectionTags.remove': async (ctx, item) => applyCollectionTags(ctx, item, 'remove'),
+  'collectionTags.set': async (ctx, item) => applyCollectionTags(ctx, item, 'replace'),
 };
+
+/**
+ * Tags on collections, one merged PUT each.
+ *
+ * There is no bulk path: `PUT /collection` carries no `tags` and no `applyTags`, so the
+ * single-resource PUT is the only way in - and that one *is* a full replace, hence
+ * `mergeForPut`. Sequential rather than parallel so a 4xx on the third collection leaves
+ * a log that says which one, and so a partial failure stops where it happened.
+ */
+async function applyCollectionTags(
+  ctx: ArrHandlerContext,
+  item: QueueItemOf<'collectionTags.add' | 'collectionTags.remove' | 'collectionTags.set'>,
+  mode: ApplyTagsMode,
+): Promise<QueueHandlerResult> {
+  // `replace` is the only mode where an empty list is an instruction rather than a
+  // missing dependency result - it is how "clear them all" is said.
+  const tagIds = resolveTagIds(item.payload.tagIds, ctx.dependencyResult, {
+    allowEmpty: mode === 'replace',
+  });
+  const wanted = new Set(tagIds);
+  let updated = 0;
+
+  for (const collectionId of item.payload.collectionIds) {
+    const current = await ctx.client.getCollection(collectionId);
+    const existing = current.view.tags;
+    const next =
+      mode === 'replace'
+        ? tagIds
+        : mode === 'add'
+          ? [...new Set([...existing, ...tagIds])]
+          : existing.filter((tagId) => !wanted.has(tagId));
+
+    // Skipping a no-op keeps the log honest about how many collections actually moved,
+    // and spares a PUT that would bump the resource for nothing.
+    if (next.length === existing.length && next.every((tagId) => existing.includes(tagId))) {
+      continue;
+    }
+
+    await ctx.client.putCollection(collectionId, mergeForPut(current.raw, { tags: next }));
+    updated += 1;
+  }
+
+  ctx.log(
+    'info',
+    `${mode === 'add' ? 'Added' : mode === 'remove' ? 'Removed' : 'Replaced'} tag(s) on ${String(updated)} of ${String(item.payload.collectionIds.length)} collection(s)`,
+  );
+  return { updated, tagIds };
+}
 
 /**
  * Filesystem handlers.

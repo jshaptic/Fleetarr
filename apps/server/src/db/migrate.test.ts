@@ -57,8 +57,9 @@ describe('migration 002', () => {
       '003_import_list_create.sql',
       '004_import_list_movie_snapshot.sql',
       '005_media_bulk_ops.sql',
+      '006_collections.sql',
     ]);
-    assert.equal(result.schemaVersion, 5);
+    assert.equal(result.schemaVersion, 6);
 
     const item = db.prepare('SELECT * FROM queue_items WHERE id = 1').get() as {
       instance_id: number;
@@ -114,7 +115,7 @@ describe('migration 002', () => {
   test('is idempotent on a second boot', () => {
     const again = runMigrations(db, MIGRATIONS_DIR);
     assert.deepEqual(again.applied, []);
-    assert.equal(again.skipped, 5);
+    assert.equal(again.skipped, 6);
   });
 
   test('accepts importList.create', () => {
@@ -181,6 +182,51 @@ describe('migration 002', () => {
         )
         .run(),
     );
+  });
+
+  test('accepts every collection op and the new collection target kind', () => {
+    const ops = [
+      'collection.update',
+      'collectionTags.add',
+      'collectionTags.remove',
+      'collectionTags.set',
+    ] as const;
+
+    for (const [index, op] of ops.entries()) {
+      db.prepare(
+        `INSERT INTO queue_items (instance_id, kind, sort_order, op, target_kind, target_label, summary, payload)
+         VALUES (1, 'arr', ?, ?, 'collection', '2 collection(s)', 'x', '{}')`,
+      ).run(40 + index, op);
+    }
+
+    const stored = db
+      .prepare(`SELECT op FROM queue_items WHERE op IN (${ops.map(() => '?').join(', ')})`)
+      .all(...ops) as Array<{ op: string }>;
+    assert.deepEqual(
+      stored.map((row) => row.op).sort(),
+      [...ops].sort(),
+    );
+
+    // target_kind is widened for the first time since v1, so it is worth pinning that the
+    // CHECK still refuses everything else.
+    assert.throws(() =>
+      db
+        .prepare(
+          `INSERT INTO queue_items (instance_id, kind, sort_order, op, target_kind, target_label, summary, payload)
+           VALUES (1, 'arr', 50, 'collection.update', 'nonesuch', 'x', 'x', '{}')`,
+        )
+        .run(),
+    );
+  });
+
+  test('accepts the collection snapshot', () => {
+    db.prepare(
+      `INSERT INTO resource_snapshots (instance_id, resource, payload) VALUES (1, 'collection', '[]')`,
+    ).run();
+    const row = db
+      .prepare(`SELECT payload FROM resource_snapshots WHERE instance_id = 1 AND resource = 'collection'`)
+      .get() as { payload: string } | undefined;
+    assert.equal(row?.payload, '[]');
   });
 
   test('the rebuilt snapshot table keeps its composite key and its cascade', () => {

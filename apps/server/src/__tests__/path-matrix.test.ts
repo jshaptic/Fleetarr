@@ -842,6 +842,7 @@ describe('an owner chip states what lives below the folder, not only what sits o
   const films = (): string => path.join(media, 'films');
   const archivedTv = (): string => path.join(media, 'archive', 'tv');
   const inbox = (): string => path.join(media, 'inbox');
+  const saga = (): string => path.join(media, 'saga');
 
   const matrix = async (query = ''): Promise<PathMatrixResponse> =>
     (await api<PathMatrixResponse>(server.url, `/storage/matrix${query}`)).body;
@@ -853,6 +854,7 @@ describe('an owner chip states what lives below the folder, not only what sits o
     mkdirSync(archivedTv(), { recursive: true });
     // Nobody roots here; an import list points at it anyway.
     mkdirSync(inbox(), { recursive: true });
+    mkdirSync(saga(), { recursive: true });
 
     radarr = await startFakeArr({ kind: 'radarr' });
     radarr.state.rootFolders = [
@@ -869,6 +871,19 @@ describe('an owner chip states what lives below the folder, not only what sits o
       fakeImportList(1, 'Trakt watchlist', films(), { enableAuto: true }),
       // The misconfiguration: a list filling a folder no instance roots at.
       fakeImportList(2, 'Stalled inbox', inbox(), { enabled: false }),
+    ];
+    // Nothing roots at, tracks in, or aims a list at `saga` - only a collection does.
+    radarr.state.collections = [
+      {
+        id: 1,
+        title: 'Dune Collection',
+        monitored: true,
+        searchOnAdd: true,
+        qualityProfileId: 1,
+        minimumAvailability: 'released',
+        rootFolderPath: saga(),
+        tags: [],
+      },
     ];
 
     sonarr = await startFakeArr({ kind: 'sonarr' });
@@ -959,6 +974,28 @@ describe('an owner chip states what lives below the folder, not only what sits o
     // Nothing adds to the parent itself - the target is what says so.
     assert.equal(owner?.importLists[0]?.path, archivedTv());
     assert.equal(owner?.use, 'containsRoot', 'a list aimed below is not a claim on this folder');
+  });
+
+  test('a folder only a collection roots at is a chip, not an untracked orphan', async () => {
+    // Before collections existed here this row had no owner at all: it read as untracked
+    // and its delete preflight came back clean, right up until Radarr rebuilt it.
+    const node = nodeAt(levelFor(await matrix(), media), 'saga');
+    const owner = node?.owners[0];
+
+    assert.equal(owner?.instanceId, radarrId);
+    assert.equal(owner?.use, 'collection', 'the lowest-precedence claim there is');
+    assert.equal(owner?.mediaUnder, 0);
+    assert.equal(owner?.collections[0]?.title, 'Dune Collection');
+    assert.equal(owner?.collections[0]?.monitored, true);
+  });
+
+  test('a Sonarr owner reports collections as known-empty, never unknown', async () => {
+    // Load-bearing: unknown here would make the fleet incomplete and block every delete.
+    const node = nodeAt(levelFor(await matrix(), path.join(media, 'archive')), 'tv');
+    const owner = node?.owners.find((entry) => entry.instanceId === sonarrId);
+
+    assert.deepEqual(owner?.collections, []);
+    assert.equal(owner?.collectionsKnown, true);
   });
 
   test('a list pointing at a folder nobody roots at is a chip of its own', async () => {

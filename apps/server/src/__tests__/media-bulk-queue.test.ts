@@ -203,4 +203,81 @@ describe('media bulk operations', () => {
 
     await api(server.url, '/queue?statuses=pending', { method: 'DELETE' });
   });
+
+  test('a collection update patches only the keys it names', async () => {
+    const stored = await run({
+      op: 'collection.update',
+      payload: { collectionIds: [1], changes: { rootFolderPath: '/data/media-4k' } },
+    });
+
+    assert.equal(stored.status, 'succeeded');
+    assert.equal(stored.affectedCount, 1, 'the column counts collections, not HTTP calls');
+    assert.equal(stored.targetKind, 'collection');
+    assert.equal(arr.state.collections[0]?.rootFolderPath, '/data/media-4k');
+    // The editor is a patch: everything it was not given survives.
+    assert.equal(arr.state.collections[0]?.title, 'Dune Collection');
+    assert.deepEqual(arr.state.collections[0]?.tags, [1]);
+  });
+
+  test('collection tags round-trip through a merged PUT, never a partial one', async () => {
+    const added = await run({
+      op: 'collectionTags.add',
+      payload: { collectionIds: [1, 2], tagIds: [3] },
+    });
+
+    assert.equal(added.status, 'succeeded');
+    assert.deepEqual(arr.state.collections[0]?.tags, [1, 3]);
+    assert.deepEqual(arr.state.collections[1]?.tags, [3]);
+    // The field the client never parses is still there, which is what mergeForPut buys.
+    assert.equal(arr.state.collections[0]?.secretServerField, 'must-survive-put');
+
+    const removed = await run({
+      op: 'collectionTags.remove',
+      payload: { collectionIds: [1, 2], tagIds: [3] },
+    });
+    assert.equal(removed.status, 'succeeded');
+    assert.deepEqual(arr.state.collections[0]?.tags, [1]);
+    assert.deepEqual(arr.state.collections[1]?.tags, []);
+
+    // An empty list is an instruction here, not a missing dependency result.
+    const cleared = await run({ op: 'collectionTags.set', payload: { collectionIds: [1], tagIds: [] } });
+    assert.equal(cleared.status, 'succeeded');
+    assert.deepEqual(arr.state.collections[0]?.tags, []);
+  });
+
+  test('a merge carries collections across, even one holding two source tags', async () => {
+    arr.state.tags = [
+      { id: 1, label: 'hd' },
+      { id: 2, label: 'kids' },
+      { id: 3, label: 'archive' },
+    ];
+    arr.state.collections[0] = { ...arr.state.collections[0]!, tags: [1, 3] };
+    arr.state.collections[1] = { ...arr.state.collections[1]!, tags: [3] };
+
+    const stored = await run({
+      op: 'tag.merge',
+      payload: { sourceTagIds: [1, 3], targetTagId: 2, deleteSources: true },
+    });
+
+    assert.equal(stored.status, 'succeeded');
+    assert.equal(stored.result?.['movedCollections'], 3, 'the shared collection moves twice');
+    // Both source tags gone, the target present exactly once - the second PUT merged onto
+    // the body the first one wrote rather than resurrecting tag 1.
+    assert.deepEqual(arr.state.collections[0]?.tags, [2]);
+    assert.deepEqual(arr.state.collections[1]?.tags, [2]);
+  });
+
+  test('a tag delete detaches from collections too, and says how many', async () => {
+    arr.state.collections[0] = { ...arr.state.collections[0]!, tags: [2] };
+    arr.state.collections[1] = { ...arr.state.collections[1]!, tags: [2] };
+
+    const stored = await run({
+      op: 'tag.delete',
+      payload: { tagId: 2, label: 'kids', detachFromMedia: false, detachFromCollections: true },
+    });
+
+    assert.equal(stored.status, 'succeeded');
+    assert.equal(stored.result?.['detachedCollections'], 2);
+    assert.ok(!arr.state.tags.some((tag) => tag.id === 2));
+  });
 });

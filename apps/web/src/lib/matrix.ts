@@ -1,4 +1,11 @@
-import type { ArrImportList, ArrQualityProfile, ArrRootFolder, ArrTagDetail, Instance } from '@fleetarr/shared';
+import type {
+  ArrCollection,
+  ArrImportList,
+  ArrQualityProfile,
+  ArrRootFolder,
+  ArrTagDetail,
+  Instance,
+} from '@fleetarr/shared';
 
 /**
  * Fleet normalisation.
@@ -20,6 +27,13 @@ export interface InstanceSnapshot {
   readonly rootFolders: readonly ArrRootFolder[];
   readonly importLists: readonly ArrImportList[];
   readonly qualityProfiles: readonly ArrQualityProfile[];
+  /**
+   * Radarr collections. **Null is unknown, `[]` is genuinely none.**
+   *
+   * Sonarr answers `[]` - it has no collections, which is an answer. Null is a Radarr too
+   * old to expose `/collection`, or one whose read failed.
+   */
+  readonly collections: readonly ArrCollection[] | null;
 }
 
 /** `full` = on every healthy instance, `unique` = on exactly one, `partial` = drift. */
@@ -34,6 +48,16 @@ export interface TagCell {
   readonly mediaCount: number;
   /** Indexers, import lists, notifications, restrictions, delay profiles. */
   readonly otherUses: number;
+  /**
+   * Radarr collections carrying this tag.
+   *
+   * Its own count rather than folded into `otherUses`, because it is the one a fleet
+   * actually curates by hand - and because `/tag/detail` does not report it at all, so it
+   * comes from the collections themselves rather than from the tag.
+   */
+  readonly collectionCount: number;
+  /** False when this instance never reported its collections: unknown, not zero. */
+  readonly collectionsKnown: boolean;
 }
 
 export interface TagMatrixRow {
@@ -43,7 +67,15 @@ export interface TagMatrixRow {
   readonly missingOn: readonly number[];
   readonly parity: ParityState;
   readonly totalMedia: number;
-  /** Exists somewhere but attached to nothing anywhere - a deletion candidate. */
+  readonly totalCollections: number;
+  /**
+   * Exists somewhere but attached to nothing anywhere - a deletion candidate.
+   *
+   * Collections count here. They were missed before, and a tag carried only by collections
+   * read as unused and was offered for deletion - which is the unknown-as-missing failure
+   * this codebase refuses, in its most expensive form. A row any instance could not answer
+   * for is never a candidate either: not knowing is not the same as not used.
+   */
   readonly unusedEverywhere: boolean;
 }
 
@@ -121,6 +153,21 @@ function attachedMediaCount(tag: ArrTagDetail): number {
   return (tag.movieIds ?? tag.seriesIds ?? []).length;
 }
 
+/**
+ * How many of this instance's collections carry the tag.
+ *
+ * Derived from the collections rather than from `/tag/detail`, which reports indexers,
+ * lists, notifications, restrictions and delay profiles but not collections - so a count
+ * taken from there would silently be zero.
+ */
+function collectionUseCount(
+  collections: readonly ArrCollection[] | null,
+  tagId: number | null,
+): number {
+  if (collections === null || tagId === null) return 0;
+  return collections.filter((entry) => entry.tags.includes(tagId)).length;
+}
+
 function otherUseCount(tag: ArrTagDetail): number {
   return (
     tag.indexerIds.length +
@@ -150,6 +197,8 @@ export function buildTagRows(snapshots: readonly InstanceSnapshot[]): TagMatrixR
         tagId: tag?.id ?? null,
         mediaCount: tag === undefined ? 0 : attachedMediaCount(tag),
         otherUses: tag === undefined ? 0 : otherUseCount(tag),
+        collectionCount: collectionUseCount(snapshot.collections, tag?.id ?? null),
+        collectionsKnown: snapshot.collections !== null,
       };
     });
 
@@ -157,6 +206,12 @@ export function buildTagRows(snapshots: readonly InstanceSnapshot[]): TagMatrixR
     const missingOn = cells.filter((cell) => cell.known && !cell.present).map((cell) => cell.instanceId);
     const totalMedia = cells.reduce((sum, cell) => sum + cell.mediaCount, 0);
     const totalOther = cells.reduce((sum, cell) => sum + cell.otherUses, 0);
+    const totalCollections = cells.reduce((sum, cell) => sum + cell.collectionCount, 0);
+    // Only over the cells that are present: an instance that does not have the tag has no
+    // collections to be ignorant of either.
+    const collectionsUnknown = cells.some(
+      (cell) => cell.known && cell.present && !cell.collectionsKnown,
+    );
 
     return {
       label,
@@ -165,7 +220,9 @@ export function buildTagRows(snapshots: readonly InstanceSnapshot[]): TagMatrixR
       missingOn,
       parity: parityOf(presentOn.length, healthy.length),
       totalMedia,
-      unusedEverywhere: totalMedia === 0 && totalOther === 0,
+      totalCollections,
+      unusedEverywhere:
+        totalMedia === 0 && totalOther === 0 && totalCollections === 0 && !collectionsUnknown,
     };
   });
 

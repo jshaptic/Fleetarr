@@ -588,6 +588,11 @@ export class PathMatrixService {
       const importLists = index.importLists.filter((list) =>
         isAtOrUnder(list.path, candidate.path),
       );
+      // The same rule, for the same reason: a monitored collection is what refills a
+      // folder after it is pruned, so the card names the ones aimed below too.
+      const collections = index.collections.filter((entry) =>
+        isAtOrUnder(entry.path, candidate.path),
+      );
 
       const use: PathUse | null =
         folder !== undefined
@@ -602,7 +607,13 @@ export class PathMatrixService {
                 // below says something about that folder, not about this one.
                 : importLists.some((list) => list.path === candidate.path)
                   ? 'importList'
-                  : null;
+                  // Lowest precedence, and exactly-this-folder only, matching the list
+                  // rule above. Without this rung a folder nothing but a collection roots
+                  // at shows no chip at all, reads as untracked, and is then refused
+                  // deletion by `collection_under` with nothing on the row to say why.
+                  : collections.some((entry) => entry.path === candidate.path)
+                    ? 'collection'
+                    : null;
       if (use === null) continue;
 
       owners.push({
@@ -617,6 +628,8 @@ export class PathMatrixService {
         title,
         rootFoldersUnder,
         importLists,
+        collections,
+        collectionsKnown: index.collectionsKnown,
         freeSpace: folder?.freeSpace ?? null,
         totalSpace: folder?.totalSpace ?? null,
       });

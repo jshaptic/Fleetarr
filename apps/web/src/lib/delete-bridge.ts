@@ -14,8 +14,15 @@ import type { FsCheckStatus, FsPreflight } from '@fleetarr/shared';
  * safety verdict in the one place that cannot see the fleet.
  */
 
-/** Cleared by staging a `rootFolder.delete` / `importList.setEnabled` ahead of the delete. */
-export const BRIDGEABLE = { rootFolders: 'root_folder_under', importLists: 'import_list_under' } as const;
+/**
+ * Cleared by staging a `rootFolder.delete`, an `importList.setEnabled` or a
+ * `collection.update` ahead of the delete.
+ */
+export const BRIDGEABLE = {
+  rootFolders: 'root_folder_under',
+  importLists: 'import_list_under',
+  collections: 'collection_under',
+} as const;
 
 /**
  * Not bridgeable, at any price.
@@ -51,6 +58,10 @@ export function needsImportListBridge(preflight: FsPreflight | null): boolean {
   return raised(preflight, BRIDGEABLE.importLists);
 }
 
+export function needsCollectionBridge(preflight: FsPreflight | null): boolean {
+  return raised(preflight, BRIDGEABLE.collections);
+}
+
 /** Whether anything is left that only `force` can get past. */
 export function needsForce(preflight: FsPreflight | null): boolean {
   return UNBRIDGEABLE.some((id) => raised(preflight, id));
@@ -68,6 +79,13 @@ export interface DisableListTarget {
   readonly instanceName: string;
   readonly importListId: number;
   readonly name: string;
+}
+
+export interface DisableCollectionTarget {
+  readonly instanceId: number;
+  readonly instanceName: string;
+  readonly collectionIds: readonly number[];
+  readonly titles: readonly string[];
 }
 
 /**
@@ -109,13 +127,48 @@ export function disableListTargets(preflight: FsPreflight | null): DisableListTa
   );
 }
 
-/** The `assumeResolved` to ask the preflight with, given what the dialog has ticked. */
-export function assumeResolved(unassign: boolean, disableLists: boolean): {
+/**
+ * Every collection *aimed* at the path - monitored, or searching on add.
+ *
+ * The same rule the lists follow, and the same reason: only a monitored one refuses the
+ * delete, but one that merely searches on add is still left pointing at a folder that is
+ * gone, and unmonitoring is reversible. Grouped per instance, because the collection
+ * editor takes a list and one queue item per instance is the honest unit of work. A
+ * collection that is neither monitored nor searching was never a finding.
+ */
+export function disableCollectionTargets(
+  preflight: FsPreflight | null,
+): DisableCollectionTarget[] {
+  return (preflight?.references ?? []).flatMap((reference) => {
+    const aimed = reference.collections.filter(
+      (entry) => entry.monitored || entry.searchOnAdd,
+    );
+    if (aimed.length === 0) return [];
+    return [
+      {
+        instanceId: reference.instanceId,
+        instanceName: reference.instanceName,
+        collectionIds: aimed.map((entry) => entry.id),
+        titles: aimed.map((entry) => entry.title),
+      },
+    ];
+  });
+}
+
+/**
+ * The `assumeResolved` to ask the preflight with, given what the dialog has ticked.
+ *
+ * An options object rather than positional booleans: there are three of them now across
+ * two call sites, and a transposed pair would silently ask about the wrong claim.
+ */
+export function assumeResolved(options: {
   rootFolders?: boolean;
   importLists?: boolean;
-} {
+  collections?: boolean;
+}): { rootFolders?: boolean; importLists?: boolean; collections?: boolean } {
   return {
-    ...(unassign ? { rootFolders: true } : {}),
-    ...(disableLists ? { importLists: true } : {}),
+    ...(options.rootFolders === true ? { rootFolders: true } : {}),
+    ...(options.importLists === true ? { importLists: true } : {}),
+    ...(options.collections === true ? { collections: true } : {}),
   };
 }

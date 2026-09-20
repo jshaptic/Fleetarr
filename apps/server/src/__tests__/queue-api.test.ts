@@ -118,6 +118,8 @@ describe('instances, resources and the staging queue over HTTP', () => {
     assert.equal(first.body.importLists.length, 1);
     assert.equal(first.body.qualityProfiles.length, 2);
     assert.equal(first.body.qualityProfiles.find((profile) => profile.id === 1)?.name, 'HD-1080p');
+    assert.equal(first.body.collections?.length, 2);
+    assert.equal(first.body.collections?.[0]?.title, 'Dune Collection');
     assert.deepEqual(
       first.body.tags.find((tag) => tag.label === 'hd')?.movieIds,
       [10, 11],

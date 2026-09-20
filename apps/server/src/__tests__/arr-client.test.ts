@@ -203,6 +203,53 @@ describe('ArrClient', () => {
     assert.equal(detail.view.label, 'hd');
     assert.deepEqual(detail.view.movieIds, [10, 11]);
   });
+
+  test('lists collections, keeping the raw body for the round trip back', async () => {
+    const collections = await clientFor(radarr).listCollections();
+    const first = collections[0];
+    assert.ok(first);
+    assert.equal(first.view.title, 'Dune Collection');
+    assert.equal(first.view.rootFolderPath, '/data/media');
+    assert.deepEqual(first.view.tags, [1]);
+    // Narrow view, whole body: the field nothing parses has to survive to the PUT.
+    assert.equal(first.raw['secretServerField'], 'must-survive-put');
+  });
+
+  test('asking a Sonarr client for collections is a bug, not an empty answer', async () => {
+    await assert.rejects(() => clientFor(sonarr).listCollections(), /only available on Radarr/);
+  });
+
+  test('the collection editor patches only the keys it is given', async () => {
+    const client = clientFor(radarr);
+    const updated = await client.bulkEditCollections({
+      collectionIds: [1],
+      rootFolderPath: '/data/media-4k',
+    });
+
+    assert.equal(updated, 1);
+    const after = await client.getCollection(1);
+    assert.equal(after.view.rootFolderPath, '/data/media-4k');
+    // Untouched by a partial body, which is what makes this endpoint exempt from the
+    // merge-before-PUT rule.
+    assert.equal(after.view.title, 'Dune Collection');
+    assert.deepEqual(after.view.tags, [1]);
+  });
+
+  test('a single-collection PUT is a replace, so it must be merged first', async () => {
+    const client = clientFor(radarr);
+    const current = await client.getCollection(2);
+
+    // The fake refuses a body missing the field it never sent us back, exactly as *Arr
+    // wipes what a partial PUT omits.
+    await assert.rejects(
+      () => client.putCollection(2, { id: 2, tags: [3] }),
+      (error: unknown) => error instanceof ArrApiError && error.code === 'arr_validation_failed',
+    );
+
+    const merged = await client.putCollection(2, { ...current.raw, tags: [3] });
+    assert.deepEqual(merged.view.tags, [3]);
+    assert.equal(merged.view.title, 'Heat Collection');
+  });
 });
 
 describe('pageMedia', () => {

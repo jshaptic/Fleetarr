@@ -73,6 +73,7 @@ function row(overrides: Partial<MediaRow> = {}): MediaRow {
     certification: 'PG-13',
     runtime: 155,
     studio: 'Legendary',
+    collection: 'Dune Collection',
     tmdbId: 438631,
     tvdbId: null,
     imdbId: 'tt1160419',
@@ -166,6 +167,7 @@ const SERIES = row({
     }),
   ],
   tags: [],
+  collection: null,
 });
 
 let ROWS: MediaRow[] = [];
@@ -251,6 +253,7 @@ const listMedia = vi.fn(
         qualityProfiles: ['HD-1080p', 'Ultra-HD'],
         genres: ['Science Fiction'],
         certifications: ['PG-13'],
+        collections: ['Dune Collection'],
         rootFolders: ['/data/media/4k', '/data/media/movies'],
       },
     }),
@@ -393,7 +396,7 @@ describe('MediaFleetView', () => {
     expect(arrival?.find('[data-instance="2"]').exists()).toBe(true);
   });
 
-  it('is eight fixed columns, and none of them is an instance', async () => {
+  it('is nine fixed columns, and none of them is an instance', async () => {
     const wrapper = await mountView();
     const headers = wrapper.findAll('thead th').map((entry) => entry.text());
 
@@ -404,6 +407,7 @@ describe('MediaFleetView', () => {
       'Size',
       'Status',
       'Tags',
+      'Collection',
       'Root folder',
     ]);
     // the no-fleet-column-grid guard: the tag matrix is the only view with an instance axis
@@ -462,6 +466,23 @@ describe('MediaFleetView', () => {
     expect(
       (wrapper.find('[data-testid="media-filter-input"]').element as HTMLInputElement).value,
     ).toBe('root:"/data/media/movies"');
+  });
+
+  it('a collection filters by itself, and a series filters by collection:none', async () => {
+    const wrapper = await mountView();
+
+    await rowFor(wrapper, 'Dune')?.find('[data-collection]').trigger('click');
+    await flushPromises();
+    expect(
+      (wrapper.find('[data-testid="media-filter-input"]').element as HTMLInputElement).value,
+    ).toBe('collection:"Dune Collection"');
+
+    // A series has no collection ever, so the dash is a known absence rather than a gap.
+    await rowFor(wrapper, 'Shogun')?.find('[data-collection="none"]').trigger('click');
+    await flushPromises();
+    expect(
+      (wrapper.find('[data-testid="media-filter-input"]').element as HTMLInputElement).value,
+    ).toBe('collection:none');
   });
 
   it('a tag filters by itself', async () => {

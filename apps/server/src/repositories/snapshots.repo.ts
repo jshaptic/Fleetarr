@@ -21,7 +21,17 @@ export type SnapshotResource =
    * Radarr only. Sonarr exposes no equivalent endpoint, so list membership there is
    * unknown, deliberately not empty.
    */
-  | 'importListMovie';
+  | 'importListMovie'
+  /**
+   * Radarr collections. **Radarr only**, and a verbatim body - unlike `importListMovie`,
+   * because `collectionTags.*` reads one back and PUTs it through `mergeForPut`, which is
+   * precisely what the keep-raw rule exists for.
+   *
+   * A missing snapshot here means unknown, never "no collections": a Radarr older than v4
+   * has no `/collection` endpoint at all, and Sonarr has no collections as a matter of
+   * fact rather than of access.
+   */
+  | 'collection';
 
 export interface Snapshot<T> {
   readonly payload: T;

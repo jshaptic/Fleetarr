@@ -47,6 +47,7 @@ function emptyVocabulary(): MediaFilterVocabulary {
     qualityProfiles: [],
     genres: [],
     certifications: [],
+    collections: [],
     rootFolders: [],
   };
 }

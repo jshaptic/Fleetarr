@@ -107,6 +107,7 @@ vi.mock('@/api/resources', () => ({
             : [],
         importLists: SNAPSHOTS[instanceId] ?? [],
         qualityProfiles: [{ id: 1, name: 'HD-1080p' }],
+        collections: [],
       });
     },
     media: vi.fn(),

@@ -30,6 +30,8 @@ function placeholderSnapshot(instance: Instance, status: InstanceSnapshot['statu
     rootFolders: [],
     importLists: [],
     qualityProfiles: [],
+    // Null, not []: a placeholder has not asked yet, and `[]` would claim it had.
+    collections: null,
   };
 }
 
@@ -115,6 +117,7 @@ export const useMatrixStore = defineStore('matrix', () => {
           rootFolders: response.rootFolders,
           importLists: response.importLists,
           qualityProfiles: response.qualityProfiles,
+          collections: response.collections,
         },
       };
     } catch (caught) {
