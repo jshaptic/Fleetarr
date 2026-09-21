@@ -1,13 +1,7 @@
-import type { ArrImportList, Instance } from '@fleetarr/shared';
+import type { ArrImportList, ArrTagDetail, Instance } from '@fleetarr/shared';
 import { describe, expect, it } from 'vitest';
-import {
-  canCloneImportList,
-  importListCloneCandidates,
-  importListOwnerFacts,
-  importListOwners,
-  ownerStateLabel,
-} from './import-lists';
-import { buildImportListRows, type InstanceSnapshot } from './matrix';
+import { buildImportListRows, qualityProfileLabel } from './import-lists';
+import type { InstanceSnapshot } from './matrix';
 
 function instance(id: number, name: string, kind: Instance['kind'] = 'radarr'): Instance {
   return {
@@ -26,6 +20,19 @@ function instance(id: number, name: string, kind: Instance['kind'] = 'radarr'): 
   };
 }
 
+function tag(id: number, label: string): ArrTagDetail {
+  return {
+    id,
+    label,
+    indexerIds: [],
+    importListIds: [],
+    notificationIds: [],
+    restrictionIds: [],
+    delayProfileIds: [],
+  };
+}
+
+/** Radarr's shape: it has an Enabled switch, spelled `enabled`. */
 function importList(id: number, name: string, overrides: Partial<ArrImportList> = {}): ArrImportList {
   return {
     id,
@@ -41,10 +48,16 @@ function importList(id: number, name: string, overrides: Partial<ArrImportList> 
   };
 }
 
+/** Sonarr's shape: no `enabled` key at all, only `enableAutomaticAdd`. */
+function sonarrList(id: number, name: string, overrides: Partial<ArrImportList> = {}): ArrImportList {
+  const { enabled: _ignored, ...list } = importList(id, name, overrides);
+  return { ...list, implementation: 'TraktImport' };
+}
+
 function snapshot(
   id: number,
   name: string,
-  parts: Partial<Pick<InstanceSnapshot, 'status' | 'importLists' | 'qualityProfiles'>> & {
+  parts: Partial<Pick<InstanceSnapshot, 'status' | 'tags' | 'importLists' | 'qualityProfiles'>> & {
     kind?: Instance['kind'];
   } = {},
 ): InstanceSnapshot {
@@ -53,7 +66,7 @@ function snapshot(
     status: parts.status ?? 'ok',
     fetchedAt: '2026-09-01T00:00:00.000Z',
     error: null,
-    tags: [],
+    tags: parts.tags ?? [],
     rootFolders: [],
     importLists: parts.importLists ?? [],
     qualityProfiles: parts.qualityProfiles ?? [],
@@ -61,112 +74,97 @@ function snapshot(
   };
 }
 
-describe('import list owners', () => {
-  it('chips only the instances that have the list, never the missing or unknown', () => {
-    const fleet = [
+describe('import list rows', () => {
+  it('gives every (list, instance) pair its own row, never folding them by name', () => {
+    const rows = buildImportListRows([
+      snapshot(1, 'Radarr-4K', {
+        importLists: [importList(1, 'Trakt watchlist', { rootFolderPath: '/data/media/movies-4k' })],
+      }),
+      snapshot(2, 'Radarr-HD', {
+        importLists: [
+          importList(4, 'trakt watchlist', { rootFolderPath: '/media/movies', enabled: false }),
+        ],
+      }),
+    ]);
+
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.key)).toEqual(['1:1', '2:4']);
+    // Each row keeps its own instance's spelling, path and state - the fold hid all three.
+    expect(rows.map((row) => row.name)).toEqual(['Trakt watchlist', 'trakt watchlist']);
+    expect(rows.map((row) => row.rootFolderPath)).toEqual([
+      '/data/media/movies-4k',
+      '/media/movies',
+    ]);
+    expect(rows.map((row) => row.enabled)).toEqual([true, false]);
+  });
+
+  it('sorts by list name, then by instance, so copies of one list sit adjacent', () => {
+    const rows = buildImportListRows([
+      snapshot(2, 'Radarr-HD', {
+        importLists: [importList(1, 'Popular'), importList(2, 'Trakt watchlist')],
+      }),
+      snapshot(1, 'Radarr-4K', { importLists: [importList(3, 'Trakt watchlist')] }),
+    ]);
+
+    expect(rows.map((row) => `${row.name}@${row.instanceName}`)).toEqual([
+      'Popular@Radarr-HD',
+      'Trakt watchlist@Radarr-4K',
+      'Trakt watchlist@Radarr-HD',
+    ]);
+  });
+
+  it('reports a Sonarr list as having no Enabled switch, deliberately not "on"', () => {
+    const rows = buildImportListRows([
+      snapshot(1, 'Radarr', { importLists: [importList(1, 'A', { enableAuto: true })] }),
+      snapshot(2, 'Sonarr', {
+        kind: 'sonarr',
+        importLists: [sonarrList(2, 'A', { enableAutomaticAdd: true })],
+      }),
+    ]);
+
+    expect(rows.map((row) => row.enabled)).toEqual([true, null]);
+    // Auto add is the switch both apps do have, whichever way they spell it.
+    expect(rows.map((row) => row.automatic)).toEqual([true, true]);
+  });
+
+  it('an instance that did not answer contributes no rows at all', () => {
+    const rows = buildImportListRows([
       snapshot(1, 'Radarr-4K', { importLists: [importList(1, 'Trakt watchlist')] }),
-      snapshot(2, 'Radarr-HD', { importLists: [] }),
-      snapshot(9, 'Radarr-Down', { status: 'error' }),
-    ];
-    const row = buildImportListRows(fleet)[0];
-    if (row === undefined) throw new Error('expected a row');
+      snapshot(9, 'Radarr-Down', { status: 'error', importLists: [importList(2, 'Stale')] }),
+    ]);
 
-    const owners = importListOwners(row, fleet);
-    expect(owners.map((owner) => owner.name)).toEqual(['Radarr-4K']);
-    expect(owners[0]?.listId).toBe(1);
-    expect(row.presentOn).not.toContain(9);
+    expect(rows.map((row) => row.instanceName)).toEqual(['Radarr-4K']);
   });
 
-  it('carries instance kind so the chip initials can colour by app', () => {
-    const fleet = [
-      snapshot(1, 'Radarr-4K', { importLists: [importList(1, 'Shared')] }),
-      snapshot(2, 'Sonarr', { kind: 'sonarr', importLists: [importList(8, 'Shared')] }),
-    ];
-    const row = buildImportListRows(fleet)[0];
-    if (row === undefined) throw new Error('expected a row');
-
-    expect(importListOwners(row, fleet).map((owner) => owner.kind)).toEqual(['radarr', 'sonarr']);
-  });
-});
-
-describe('clone candidates', () => {
-  it('offers only healthy same-kind instances that do not already have the list', () => {
-    const fleet = [
-      snapshot(1, 'Radarr-4K', { importLists: [importList(1, 'Popular')] }),
-      snapshot(2, 'Radarr-HD', { importLists: [] }),
-      snapshot(3, 'Sonarr', { kind: 'sonarr', importLists: [] }),
-      snapshot(9, 'Radarr-Down', { status: 'error' }),
-    ];
-    const row = buildImportListRows(fleet)[0];
-    if (row === undefined) throw new Error('expected a row');
-
-    const candidates = importListCloneCandidates(row, fleet);
-    expect(candidates.map((entry) => entry.name)).toEqual(['Radarr-4K', 'Radarr-HD']);
-    expect(candidates.find((entry) => entry.name === 'Radarr-4K')?.alreadyHas).toBe(true);
-    expect(candidates.find((entry) => entry.name === 'Radarr-HD')?.alreadyHas).toBe(false);
-    expect(canCloneImportList(row, fleet)).toBe(true);
-  });
-
-  it('hides the + when every same-kind instance already has the list', () => {
-    const fleet = [
-      snapshot(1, 'Radarr-4K', { importLists: [importList(1, 'Shared')] }),
-      snapshot(2, 'Radarr-HD', { importLists: [importList(2, 'Shared')] }),
-      snapshot(3, 'Sonarr', { kind: 'sonarr', importLists: [] }),
-    ];
-    const row = buildImportListRows(fleet)[0];
-    if (row === undefined) throw new Error('expected a row');
-
-    expect(canCloneImportList(row, fleet)).toBe(false);
-  });
-});
-
-describe('chip and card copy', () => {
-  it('puts on/off on the chip and the rest on the card, without drift language', () => {
-    const fleet = [
+  it('resolves tag ids against that instance, and leaves an id it cannot name as an id', () => {
+    const rows = buildImportListRows([
       snapshot(1, 'Radarr-4K', {
-        importLists: [
-          importList(1, 'A', {
-            enabled: true,
-            enableAuto: true,
-            rootFolderPath: '/data/media/movies-4k',
-            qualityProfileId: 4,
-          }),
-        ],
-        qualityProfiles: [{ id: 4, name: 'Ultra-HD' }],
+        tags: [tag(1, 'kids'), tag(2, 'shared')],
+        importLists: [importList(1, 'Trakt watchlist', { tags: [2, 1, 7] })],
       }),
-    ];
-    const row = buildImportListRows(fleet)[0];
-    if (row === undefined) throw new Error('expected a row');
-    const [on] = importListOwners(row, fleet);
+    ]);
 
-    expect(ownerStateLabel(on!)).toEqual({ value: 'on', title: 'Enabled, automatic add on' });
-    expect(on?.qualityProfileName).toBe('Ultra-HD');
-
-    const facts = importListOwnerFacts(on!);
-    expect(facts.map((fact) => fact.label)).toEqual(['State', 'Root folder', 'Profile']);
-    expect(facts[1]).toMatchObject({ value: '/data/media/movies-4k', tone: 'normal', detail: [] });
-    expect(facts[2]).toMatchObject({ value: 'Ultra-HD', tone: 'normal', detail: [] });
+    expect(rows[0]?.tags).toEqual(['shared', 'kids', '#7']);
   });
 
-  it('keeps a raw id when the instance has no matching profile, and none set when the id is 0', () => {
-    const fleet = [
+  it('never invents a profile name for an id this instance has no profile for', () => {
+    const [named, unknown, unset] = buildImportListRows([
       snapshot(1, 'Radarr-4K', {
+        qualityProfiles: [{ id: 1, name: 'Ultra-HD' }],
         importLists: [
-          importList(1, 'A', { qualityProfileId: 9 }),
-          importList(2, 'B', { qualityProfileId: 0 }),
+          importList(1, 'A', { qualityProfileId: 1 }),
+          importList(2, 'B', { qualityProfileId: 9 }),
+          importList(3, 'C', { qualityProfileId: 0 }),
         ],
-        qualityProfiles: [{ id: 1, name: 'HD-1080p' }],
       }),
-    ];
-    const rows = buildImportListRows(fleet);
-    const unknownRow = rows.find((row) => row.name === 'A');
-    const unsetRow = rows.find((row) => row.name === 'B');
-    if (unknownRow === undefined || unsetRow === undefined) throw new Error('expected both rows');
+    ]);
 
-    const unknown = importListOwners(unknownRow, fleet)[0];
-    const unset = importListOwners(unsetRow, fleet)[0];
+    expect(named?.qualityProfileName).toBe('Ultra-HD');
+    expect(unknown?.qualityProfileName).toBeNull();
+    expect(unset?.qualityProfileName).toBeNull();
 
-    expect(importListOwnerFacts(unknown!)[2]).toMatchObject({ value: 'id 9', tone: 'muted' });
-    expect(importListOwnerFacts(unset!)[2]).toMatchObject({ value: 'none set', tone: 'muted' });
+    expect(qualityProfileLabel(named!)).toBe('Ultra-HD');
+    expect(qualityProfileLabel(unknown!)).toBe('id 9');
+    expect(qualityProfileLabel(unset!)).toBe('none set');
   });
 });

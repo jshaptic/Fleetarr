@@ -378,15 +378,6 @@ export class ArrClient {
     return toResource(arrImportListSchema, body);
   }
 
-  async createImportList(body: ArrJson): Promise<ArrResource<ArrImportList>> {
-    const response = await this.request<unknown>({
-      method: 'POST',
-      path: '/importlist',
-      body,
-    });
-    return toResource(arrImportListSchema, response ?? body);
-  }
-
   /** Takes the full merged body - see mergeForPut. */
   async putImportList(importListId: number, body: ArrJson): Promise<ArrResource<ArrImportList>> {
     const response = await this.request<unknown>({

@@ -7,6 +7,7 @@ import type {
   PathCollection,
   PathImportList,
 } from '@fleetarr/shared';
+import { importListAutomatic, importListEnabled } from '@fleetarr/shared';
 import type { InstancesRepository } from '../repositories/instances.repo.js';
 import type { ResourcesService } from './resources.service.js';
 
@@ -353,10 +354,10 @@ function buildIndex(
     importListEntries.push({
       id: list.id,
       name: list.name,
-      enabled: list.enabled,
-      // Radarr and Sonarr spell the same switch differently; either one being on means
-      // the list adds media on its own.
-      automatic: (list.enableAuto ?? false) || (list.enableAutomaticAdd ?? false),
+      // Sonarr has no Enabled switch at all, so a list there is live by existing. That is
+      // `true`, not unknown: `automatic` is what decides whether it refills the folder.
+      enabled: importListEnabled(list) ?? true,
+      automatic: importListAutomatic(list),
       path: normalised,
     });
   }

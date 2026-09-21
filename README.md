@@ -27,11 +27,10 @@ and push it. Fleetarr reads what is already on the instances, lets you change th
 data in place, and writes the edits back. The *Arr apps stay the source of truth.
 
 Connect the instances and work across them at once: create, rename, merge or delete tags;
-copy an import list onto another instance and enable or disable lists in bulk; filter
-movies and series and retag, move, change profiles, monitor or delete them; remap root
-folders and create or prune directories on disk. Mix disk work with *Arr work in one
-batch - rename a folder, then tell Radarr the new root with `moveFiles: false`, so
-nothing gets copied.
+compare every instance's import lists side by side; filter movies and series and retag,
+move, change profiles, monitor or delete them; remap root folders and create or prune
+directories on disk. Mix disk work with *Arr work in one batch - rename a folder, then
+tell Radarr the new root with `moveFiles: false`, so nothing gets copied.
 
 Nothing reaches an instance until you press **Apply All**. The queue runs sequentially
 and pauses on the first failure, so you are never left half-applied.

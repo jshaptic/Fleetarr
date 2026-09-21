@@ -39,8 +39,6 @@ export interface HandlerContext {
 export interface ArrHandlerContext extends HandlerContext {
   readonly client: ArrClient;
   readonly instance: InstanceWithKey;
-  /** Another instance's client - used to read a source import list before POSTing it here. */
-  readonly clientFor: (instanceId: number) => { client: ArrClient; instance: InstanceWithKey };
 }
 
 /** Filesystem operations get the storage engine and no instance at all. */
@@ -319,28 +317,6 @@ export const arrHandlers: ArrQueueHandlers = {
       `Moved ${updated} item(s) to ${toRootFolderPath} - files ${moveFiles ? 'relocated on disk' : 'left in place'}`,
     );
     return { updated, rootFolderPath: toRootFolderPath, moveFiles };
-  },
-
-  'importList.create': async (ctx, item) => {
-    const source = ctx.clientFor(item.payload.sourceInstanceId);
-    if (source.instance.kind !== ctx.instance.kind) {
-      throw new ValidationError(
-        `Cannot copy a ${source.instance.kind} import list onto ${ctx.instance.kind}`,
-      );
-    }
-
-    const current = await source.client.getImportList(item.payload.sourceImportListId);
-    const body: ArrJson = { ...current.raw };
-    delete body['id'];
-    // Tag ids are per-instance; copying them would attach the wrong tags, or none.
-    body['tags'] = [];
-
-    const created = await ctx.client.createImportList(body);
-    ctx.log(
-      'info',
-      `Created import list "${created.view.name}" (#${String(created.view.id)}) from ${source.instance.name}`,
-    );
-    return { importListId: created.view.id };
   },
 
   'importList.update': async (ctx, item) => {

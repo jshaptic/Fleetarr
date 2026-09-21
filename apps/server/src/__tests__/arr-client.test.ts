@@ -121,17 +121,6 @@ describe('ArrClient', () => {
     assert.equal(list?.secretServerField, 'must-survive-put');
   });
 
-  test('import list POST creates a list from the raw body', async () => {
-    const client = clientFor(radarr);
-    const current = await client.getImportList(1);
-    const { id: _id, ...body } = current.raw;
-
-    const created = await client.createImportList({ ...body, name: 'Copied watchlist', tags: [] });
-    assert.equal(created.view.name, 'Copied watchlist');
-    assert.ok(created.view.id !== 1);
-    assert.equal(radarr.state.importLists.some((list) => list.name === 'Copied watchlist'), true);
-  });
-
   test('lists quality profiles by name while keeping the raw body', async () => {
     const profiles = await clientFor(radarr).listQualityProfiles();
     const hd = profiles.find((entry) => entry.view.id === 1);

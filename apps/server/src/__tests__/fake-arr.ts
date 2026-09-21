@@ -85,7 +85,8 @@ export interface FakeImportList {
   name: string;
   implementation: string;
   configContract: string;
-  enabled: boolean;
+  /** Optional because Sonarr's import list has no such key - see the flavouring below. */
+  enabled?: boolean;
   enableAuto?: boolean;
   enableAutomaticAdd?: boolean;
   rootFolderPath: string;
@@ -291,6 +292,19 @@ export async function startFakeArr(
     const { collection: _dropped, ...series } = media;
     return series;
   };
+
+  /**
+   * The same for an import list, and for the same reason. Radarr's has `enabled` and
+   * `enableAuto`; Sonarr's has neither key - only `enableAutomaticAdd`. Seeding the Radarr
+   * spelling into a Sonarr fake made every "is this list on" path pass without ever
+   * meeting the shape it has to cope with.
+   */
+  if (kind === 'sonarr') {
+    state.importLists = state.importLists.map((list) => {
+      const { enabled: _absent, enableAuto: _radarrOnly, minimumAvailability: _also, ...rest } = list;
+      return { ...rest, enableAutomaticAdd: _radarrOnly ?? false } as FakeImportList;
+    });
+  }
 
   const mediaPath = kind === 'radarr' ? '/movie' : '/series';
   const idKey = kind === 'radarr' ? 'movieIds' : 'seriesIds';
@@ -560,19 +574,6 @@ export async function startFakeArr(
     }
     if (method === 'GET' && path === '/importlist') {
       send(res, 200, state.importLists);
-      return;
-    }
-    if (method === 'POST' && path === '/importlist') {
-      const body = await readBody(req);
-      const id = Math.max(0, ...state.importLists.map((list) => list.id)) + 1;
-      const created = {
-        secretServerField: 'must-survive-put',
-        tags: [],
-        ...body,
-        id,
-      } as unknown as FakeImportList;
-      state.importLists.push(created);
-      send(res, 201, created);
       return;
     }
     if (method === 'GET' && /^\/importlist\/\d+$/.test(path)) {

@@ -1,7 +1,6 @@
-import type { ArrCollection, ArrImportList, ArrRootFolder, ArrTagDetail, Instance } from '@fleetarr/shared';
+import type { ArrCollection, ArrRootFolder, ArrTagDetail, Instance } from '@fleetarr/shared';
 import { describe, expect, it } from 'vitest';
 import {
-  buildImportListRows,
   buildRootFolderRows,
   buildTagRows,
   findCollisions,
@@ -54,21 +53,6 @@ function collection(id: number, title: string, tags: number[] = []): ArrCollecti
 
 function rootFolder(id: number, path: string, accessible = true): ArrRootFolder {
   return { id, path, accessible, freeSpace: 1000, totalSpace: 5000 };
-}
-
-function importList(id: number, name: string, overrides: Partial<ArrImportList> = {}): ArrImportList {
-  return {
-    id,
-    name,
-    implementation: 'TraktListImport',
-    configContract: 'TraktListSettings',
-    enabled: true,
-    rootFolderPath: '/data/media',
-    qualityProfileId: 1,
-    tags: [],
-    fields: [],
-    ...overrides,
-  };
 }
 
 function snapshot(
@@ -220,33 +204,6 @@ describe('root folder topology', () => {
     expect(row?.inaccessibleOn).toEqual([3]);
   });
 
-});
-
-describe('import list fleet', () => {
-  it('matches lists by name across instances', () => {
-    const rows = buildImportListRows([
-      snapshot(1, 'Radarr-4K', {
-        importLists: [importList(1, 'Trakt watchlist', { rootFolderPath: '/data/media/movies-4k' })],
-      }),
-      snapshot(2, 'Radarr-HD', {
-        importLists: [
-          importList(4, 'trakt watchlist', { rootFolderPath: '/media/movies', enabled: false }),
-        ],
-      }),
-    ]);
-
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.name).toBe('Trakt watchlist');
-    expect(rows[0]?.presentOn).toEqual([1, 2]);
-  });
-
-  it('reads the auto-add flag from either flavour of the field', () => {
-    const rows = buildImportListRows([
-      snapshot(1, 'Radarr', { importLists: [importList(1, 'A', { enableAuto: true })] }),
-      snapshot(2, 'Sonarr', { importLists: [importList(2, 'A', { enableAutomaticAdd: true })] }),
-    ]);
-    expect(rows[0]?.cells.map((cell) => cell.autoAdd)).toEqual([true, true]);
-  });
 });
 
 describe('find and replace', () => {

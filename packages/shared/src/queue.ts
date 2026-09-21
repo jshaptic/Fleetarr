@@ -17,7 +17,6 @@ export const ARR_OPS = [
   'media.setMonitored',
   'media.setQualityProfile',
   'media.delete',
-  'importList.create',
   'importList.update',
   'importList.delete',
   'importList.setEnabled',
@@ -159,7 +158,6 @@ export interface QueueOpPayloads {
    * just removed, so both are explicit rather than defaulted.
    */
   'media.delete': { mediaIds: number[]; deleteFiles: boolean; addImportExclusion: boolean };
-  'importList.create': { name: string; sourceInstanceId: number; sourceImportListId: number };
   'importList.update': { importListId: number; changes: ImportListChanges };
   'importList.delete': { importListId: number };
   'importList.setEnabled': { importListId: number; enabled: boolean; enableAutomaticAdd: boolean };
@@ -333,11 +331,6 @@ export const queuePayloadSchemas: QueuePayloadSchemas = {
     /** The destructive one: tells *Arr to physically relocate the files on disk. */
     moveFiles: z.boolean(),
   }),
-  'importList.create': z.object({
-    name: z.string().min(1),
-    sourceInstanceId: z.number().int().positive(),
-    sourceImportListId: z.number().int().positive(),
-  }),
   'importList.update': z.object({
     importListId: z.number().int().positive(),
     changes: importListChangesSchema,
@@ -438,7 +431,6 @@ export function targetKindForOp(op: QueueOp, instanceKind: InstanceKind | null):
     case 'rootFolder.create':
     case 'rootFolder.delete':
       return 'rootFolder';
-    case 'importList.create':
     case 'importList.update':
     case 'importList.delete':
     case 'importList.setEnabled':
@@ -500,8 +492,6 @@ export function summariseQueueOp(item: NewQueueItem): string {
       return `Move ${item.payload.mediaIds.length} item(s) to ${item.payload.toRootFolderPath}${
         item.payload.moveFiles ? ' (moving files on disk)' : ' (leaving files in place)'
       }`;
-    case 'importList.create':
-      return `Copy import list "${item.payload.name}"`;
     case 'importList.update':
       return `Update import list #${item.payload.importListId}`;
     case 'importList.delete':
@@ -597,7 +587,6 @@ export function affectedCountForOp(item: NewQueueItem): number {
     case 'tag.delete':
     case 'rootFolder.create':
     case 'rootFolder.delete':
-    case 'importList.create':
     case 'importList.update':
     case 'importList.delete':
     case 'importList.setEnabled':
@@ -647,8 +636,6 @@ export function describeQueueTarget(item: NewQueueItem): QueueTargetDescription 
       return { targetId: item.payload.rootFolderId, targetLabel: item.payload.path };
     case 'media.moveRootFolder':
       return { targetId: null, targetLabel: item.payload.toRootFolderPath };
-    case 'importList.create':
-      return { targetId: null, targetLabel: item.payload.name };
     case 'importList.update':
     case 'importList.delete':
     case 'importList.setEnabled':

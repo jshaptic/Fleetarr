@@ -41,9 +41,9 @@ The tag matrix is the only fleet-column grid. These five cell states are its onl
 
 `cell.known` enforces the last; `unusedEverywhere` counts collections too, so a tag only
 collections carry - or one whose collections went unread - is **not** a deletion candidate.
-Import lists, `/paths` and `/media` drop the column axis: rows are lists, folders or titles,
-instances are chips. Unreachable ones are stated once above the table, never as "missing";
-an absent instance simply has no row. **None of the three reports parity or drift.**
+`/paths` and `/media` drop the column axis: rows are folders or titles, instances chips;
+import lists go further - **a row per (list, instance)**, and no writes. Unreachable ones
+are stated once, never as "missing"; absent means no row. **None reports parity or drift.**
 
 ## The folder view (`/paths`)
 
@@ -176,9 +176,9 @@ one binding for the whole tree, so a rename stays atomic.
   a Radarr before v4 - **unknown, never "none"**.
 - **`/movie` and `/series` do not paginate** - fetched once into `resource_snapshots`, then
   paged server-side. Bulk media writes go through `{movie,series}/editor`, PUT and DELETE.
-- **The two apps disagree per field**: `enableAuto`/`enableAutomaticAdd`,
-  `addImportExclusion`/`addImportListExclusion`, `sizeOnDisk` vs `statistics.sizeOnDisk`,
-  `studio`/`network`. *Arr ignores an unknown key, so each pair gets a constant.
+- **The two apps disagree per field**: `enableAuto`/`enableAutomaticAdd`, `studio`/`network`,
+  `addImportExclusion`/`addImportListExclusion`, `sizeOnDisk` vs `statistics.sizeOnDisk`. *Arr
+  ignores an unknown key, so each gets a constant. `enabled` is **Radarr-only** - `null`, never `true`.
 - **Map errors to codes the UI can act on**, never raw statuses (`arr_unauthorized`,
   `arr_timeout`, `arr_unreachable` …) - all in `arr/http.ts`.
 

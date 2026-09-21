@@ -11,9 +11,9 @@ import type {
  * Fleet normalisation.
  *
  * Everything here is pure: instance snapshots in, comparison rows out. The views never
- * reason about a "current instance". Tag cells stay aligned with the fleet columns; import
- * lists keep a per-instance cell model so chips and clone can see who already has the
- * list (`lib/import-lists.ts`).
+ * reason about a "current instance". Tag cells stay aligned with the fleet columns.
+ * Import lists are not a grid at all any more - one row per (list, instance) pair, built
+ * in `lib/import-lists.ts`.
  */
 
 export type SnapshotStatus = 'loading' | 'ok' | 'error';
@@ -96,25 +96,6 @@ export interface RootFolderRow {
   readonly missingOn: readonly number[];
   readonly inaccessibleOn: readonly number[];
   readonly parity: ParityState;
-}
-
-export interface ImportListCell {
-  readonly instanceId: number;
-  readonly known: boolean;
-  readonly present: boolean;
-  readonly listId: number | null;
-  readonly enabled: boolean;
-  readonly autoAdd: boolean;
-  readonly rootFolderPath: string;
-  readonly qualityProfileId: number;
-}
-
-export interface ImportListRow {
-  readonly key: string;
-  readonly name: string;
-  readonly implementation: string;
-  readonly cells: readonly ImportListCell[];
-  readonly presentOn: readonly number[];
 }
 
 export interface FleetStats {
@@ -265,51 +246,6 @@ export function buildRootFolderRows(snapshots: readonly InstanceSnapshot[]): Roo
   });
 
   return rows.sort((a, b) => a.path.localeCompare(b.path, 'en'));
-}
-
-function autoAddOf(list: ArrImportList): boolean {
-  return list.enableAutomaticAdd ?? list.enableAuto ?? false;
-}
-
-export function buildImportListRows(snapshots: readonly InstanceSnapshot[]): ImportListRow[] {
-  const healthy = comparable(snapshots);
-  const keys = new Map<string, ArrImportList>();
-  for (const snapshot of healthy) {
-    for (const list of snapshot.importLists) {
-      const key = list.name.trim().toLowerCase();
-      if (!keys.has(key)) keys.set(key, list);
-    }
-  }
-
-  const rows = [...keys.entries()].map(([key, sample]): ImportListRow => {
-    const cells = snapshots.map((snapshot): ImportListCell => {
-      const list = snapshot.importLists.find((entry) => entry.name.trim().toLowerCase() === key);
-      return {
-        instanceId: snapshot.instance.id,
-        known: snapshot.status === 'ok',
-        present: list !== undefined,
-        listId: list?.id ?? null,
-        enabled: list?.enabled ?? false,
-        autoAdd: list === undefined ? false : autoAddOf(list),
-        rootFolderPath: list?.rootFolderPath ?? '',
-        qualityProfileId: list?.qualityProfileId ?? 0,
-      };
-    });
-
-    const presentOn = cells
-      .filter((cell) => cell.known && cell.present)
-      .map((cell) => cell.instanceId);
-
-    return {
-      key,
-      name: sample.name,
-      implementation: sample.implementationName ?? sample.implementation,
-      cells,
-      presentOn,
-    };
-  });
-
-  return rows.sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
 }
 
 export function buildFleetStats(

@@ -63,8 +63,10 @@ export type ArrField = z.infer<typeof arrFieldSchema>;
 
 /**
  * Import lists diverge the most between the two apps:
- * Radarr uses `enableAuto`/`minimumAvailability`, Sonarr uses `enableAutomaticAdd`/
- * `seasonFolder`/`seriesType`. Both are optional here; `raw` carries the rest.
+ * Radarr uses `enabled`/`enableAuto`/`minimumAvailability`, Sonarr uses
+ * `enableAutomaticAdd`/`seasonFolder`/`seriesType`. All optional here; `raw` carries the
+ * rest. `enabled` especially: Sonarr has no such switch, so it must stay `undefined` there
+ * rather than default to `true` - see `importListEnabled`.
  */
 export const arrImportListSchema = z.object({
   id: z.number().int(),
@@ -72,7 +74,7 @@ export const arrImportListSchema = z.object({
   implementation: z.string(),
   implementationName: z.string().optional(),
   configContract: z.string(),
-  enabled: z.boolean().default(true),
+  enabled: z.boolean().optional(),
   enableAuto: z.boolean().optional(),
   enableAutomaticAdd: z.boolean().optional(),
   rootFolderPath: z.string().default(''),
@@ -236,6 +238,21 @@ export function mediaHasFile(media: ArrMedia): boolean | null {
   if (media.hasFile !== undefined) return media.hasFile;
   const files = media.statistics?.episodeFileCount;
   return files === undefined ? null : files > 0;
+}
+
+/**
+ * Radarr's Enabled switch, which Sonarr does not have at all.
+ *
+ * `null` means "this app has no such switch" - deliberately not `true`. A Sonarr list is
+ * live by existing; `importListAutomatic` is the only thing that decides what it does.
+ */
+export function importListEnabled(list: ArrImportList): boolean | null {
+  return list.enabled ?? null;
+}
+
+/** The switch both apps do have, spelled differently. Either one on means it adds by itself. */
+export function importListAutomatic(list: ArrImportList): boolean {
+  return (list.enableAuto ?? false) || (list.enableAutomaticAdd ?? false);
 }
 
 /** Sonarr's episode progress, or null for a movie (and for a series with no rollup). */

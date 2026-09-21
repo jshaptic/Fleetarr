@@ -286,6 +286,27 @@ describe('PathIndexService', () => {
     assert.equal(index?.importLists[1]?.automatic, false);
   });
 
+  test('a Sonarr list has no Enabled switch, so it counts as live by existing', async () => {
+    // Sonarr's import list carries neither `enabled` nor `enableAuto` - only
+    // `enableAutomaticAdd`. Reading the absent switch as "off" would quietly excuse every
+    // Sonarr list from the delete guard, which is the folder-recreating bug.
+    const { enabled: _absent, ...sonarrList } = importList(1, '/data/media/tv', {
+      enableAutomaticAdd: true,
+    });
+    const { service } = serviceFor([
+      {
+        instance: instance({ kind: 'sonarr' }),
+        rootFolders: [rootFolder('/data/media/tv')],
+        importLists: [sonarrList],
+      },
+    ]);
+
+    const [index] = await service.index();
+
+    assert.equal(index?.importLists[0]?.enabled, true);
+    assert.equal(index?.importLists[0]?.automatic, true);
+  });
+
   test('counts what is on disk separately from what is merely tracked', async () => {
     const { service } = serviceFor([
       {

@@ -21,7 +21,7 @@ const routes: RouteRecordRaw[] = [
     path: '/import-lists',
     name: 'import-lists',
     component: () => import('@/views/ImportListFleetView.vue'),
-    meta: { title: 'List management' },
+    meta: { title: 'Import lists' },
   },
   {
     path: '/media',

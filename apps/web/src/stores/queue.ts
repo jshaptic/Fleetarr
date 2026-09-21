@@ -234,8 +234,6 @@ function stageKeysFor(item: QueueItem): string[] {
         stageKey(item.instanceId, 'rootFolder', item.payload.toRootFolderPath),
         stageKey(null, 'path', item.payload.toRootFolderPath),
       ];
-    case 'importList.create':
-      return [stageKey(item.instanceId, 'importList', item.payload.name)];
     case 'importList.update':
     case 'importList.delete':
     case 'importList.setEnabled':
@@ -414,10 +412,6 @@ export const useQueueStore = defineStore('queue', () => {
 
   const stagedForImportList = (instanceId: number, listId: number): QueueItem[] =>
     stagedIndex.value.get(stageKey(instanceId, 'importList', String(listId))) ?? [];
-
-  /** A create has no dest id yet, so it is keyed by the list name. */
-  const stagedForImportListName = (instanceId: number, name: string): QueueItem[] =>
-    stagedIndex.value.get(stageKey(instanceId, 'importList', name)) ?? [];
 
   const stagedForCollection = (instanceId: number, collectionId: number): QueueItem[] =>
     stagedIndex.value.get(stageKey(instanceId, 'collection', String(collectionId))) ?? [];
@@ -1015,21 +1009,6 @@ export const useQueueStore = defineStore('queue', () => {
     }
   }
 
-  function setImportListEnabled(
-    targets: readonly ImportListTarget[],
-    enabled: boolean,
-    enableAutomaticAdd: boolean,
-  ): Promise<QueueItem[]> {
-    return push(
-      targets.map((target) => ({
-        instanceId: target.instanceId,
-        op: 'importList.setEnabled' as const,
-        payload: { importListId: target.importListId, enabled, enableAutomaticAdd },
-      })),
-      `${enabled ? 'enable' : 'disable'} on ${String(targets.length)} import list(s)`,
-    );
-  }
-
   function updateImportListsAcross(
     targets: readonly ImportListTarget[],
     changes: ImportListChanges,
@@ -1041,28 +1020,6 @@ export const useQueueStore = defineStore('queue', () => {
         payload: { importListId: target.importListId, changes },
       })),
       `import list changes on ${String(targets.length)} instance(s)`,
-    );
-  }
-
-  function createImportListAcross(
-    targets: ReadonlyArray<{
-      instanceId: number;
-      name: string;
-      sourceInstanceId: number;
-      sourceImportListId: number;
-    }>,
-  ): Promise<QueueItem[]> {
-    return push(
-      targets.map((target) => ({
-        instanceId: target.instanceId,
-        op: 'importList.create' as const,
-        payload: {
-          name: target.name,
-          sourceInstanceId: target.sourceInstanceId,
-          sourceImportListId: target.sourceImportListId,
-        },
-      })),
-      `copy "${targets[0]?.name ?? 'import list'}" onto ${String(targets.length)} instance(s)`,
     );
   }
 
@@ -1477,7 +1434,6 @@ export const useQueueStore = defineStore('queue', () => {
     refreshMediaAcross,
     stagedForRootFolder,
     stagedForImportList,
-    stagedForImportListName,
     stagedForCollection,
     stagedForPath,
     runProgress,
@@ -1494,9 +1450,7 @@ export const useQueueStore = defineStore('queue', () => {
     createRootFolderAcross,
     deleteRootFolderAcross,
     remapRootFolder,
-    setImportListEnabled,
     updateImportListsAcross,
-    createImportListAcross,
     stageFsOperation,
     stageFsOperations,
     stageFolderDeletions,

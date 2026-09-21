@@ -3,9 +3,9 @@ import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 import { ApiRequestError } from '@/api/client';
 import { resourcesApi } from '@/api/resources';
+import { buildImportListRows } from '@/lib/import-lists';
 import {
   buildFleetStats,
-  buildImportListRows,
   buildRootFolderRows,
   buildTagRows,
   previewFindReplace,

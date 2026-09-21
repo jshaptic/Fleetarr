@@ -58,8 +58,9 @@ describe('migration 002', () => {
       '004_import_list_movie_snapshot.sql',
       '005_media_bulk_ops.sql',
       '006_collections.sql',
+      '007_drop_import_list_create.sql',
     ]);
-    assert.equal(result.schemaVersion, 6);
+    assert.equal(result.schemaVersion, 7);
 
     const item = db.prepare('SELECT * FROM queue_items WHERE id = 1').get() as {
       instance_id: number;
@@ -115,19 +116,24 @@ describe('migration 002', () => {
   test('is idempotent on a second boot', () => {
     const again = runMigrations(db, MIGRATIONS_DIR);
     assert.deepEqual(again.applied, []);
-    assert.equal(again.skipped, 6);
+    assert.equal(again.skipped, 7);
   });
 
-  test('accepts importList.create', () => {
+  test('refuses importList.create, which v7 took back out', () => {
+    assert.throws(() =>
+      db
+        .prepare(
+          `INSERT INTO queue_items (instance_id, kind, sort_order, op, target_kind, target_label, summary, payload)
+           VALUES (1, 'arr', 5, 'importList.create', 'importList', 'Trakt watchlist', 'Copy import list', '{}')`,
+        )
+        .run(),
+    );
+
+    // The target_kind survives it - three import list ops still use it.
     db.prepare(
       `INSERT INTO queue_items (instance_id, kind, sort_order, op, target_kind, target_label, summary, payload)
-       VALUES (1, 'arr', 5, 'importList.create', 'importList', 'Trakt watchlist', 'Copy import list', '{}')`,
+       VALUES (1, 'arr', 5, 'importList.delete', 'importList', 'import list #3', 'Delete import list #3', '{"importListId":3}')`,
     ).run();
-
-    const row = db.prepare("SELECT op FROM queue_items WHERE op = 'importList.create'").get() as {
-      op: string;
-    };
-    assert.equal(row.op, 'importList.create');
   });
 
   test('accepts the importListMovie snapshot, and still refuses an unknown resource', () => {
@@ -249,5 +255,97 @@ describe('migration 002', () => {
     assert.match(sql, /PRIMARY KEY \(instance_id, resource\)/);
     assert.match(sql, /REFERENCES instances\(id\) ON DELETE CASCADE/);
     assert.match(sql, /WITHOUT ROWID/);
+  });
+});
+
+/**
+ * v7 is the first migration that has to *delete* rows, because the op it removes can no
+ * longer be read back: `rowToQueueItem` throws on an op with no payload schema, and
+ * `GET /queue` maps history as well as pending work. A left-behind row would take the
+ * whole queue endpoint down on an install that had used the feature.
+ */
+describe('migration 007', () => {
+  let configDir: string;
+  let db: SqliteDatabase;
+
+  before(() => {
+    configDir = makeTempDir();
+    db = openDatabase(path.join(configDir, 'fleetarr.db'));
+
+    // Build a v6 database by hand - the rebuilds need foreign keys off, exactly as the
+    // runner turns them off for a pending batch.
+    db.pragma('foreign_keys = OFF');
+    db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+      name       TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )`);
+    const record = db.prepare('INSERT INTO schema_migrations (name) VALUES (?)');
+    for (const file of [
+      '001_init.sql',
+      '002_filesystem.sql',
+      '003_import_list_create.sql',
+      '004_import_list_movie_snapshot.sql',
+      '005_media_bulk_ops.sql',
+      '006_collections.sql',
+    ]) {
+      db.exec(readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8'));
+      record.run(file);
+    }
+    db.pragma('user_version = 6');
+
+    db.prepare(
+      `INSERT INTO instances (name, kind, base_url, api_key_enc) VALUES ('Radarr','radarr','http://host:7878','v1:x:y:z')`,
+    ).run();
+    db.prepare(`INSERT INTO queue_runs (status, on_error, total_items) VALUES ('completed','pause',2)`).run();
+    // id 1: the doomed clone, already applied. id 2: unrelated work gated behind it.
+    db.prepare(
+      `INSERT INTO queue_items (id, instance_id, kind, run_id, sort_order, op, status, target_kind, target_label, summary, payload)
+       VALUES (1, 1, 'arr', 1, 1, 'importList.create', 'succeeded', 'importList', 'Trakt watchlist', 'Copy import list', '{"name":"Trakt watchlist","sourceInstanceId":2,"sourceImportListId":9}')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO queue_items (id, instance_id, kind, run_id, depends_on_id, sort_order, op, status, target_kind, target_label, summary, payload)
+       VALUES (2, 1, 'arr', 1, 1, 2, 'tag.create', 'pending', 'tag', 'hd', 'Create tag "hd"', '{"label":"hd"}')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO queue_events (run_id, item_id, level, message, http_method, http_status)
+       VALUES (1, 1, 'info', 'Created import list "Trakt watchlist" (#4)', 'POST', 201)`,
+    ).run();
+    db.pragma('foreign_keys = ON');
+  });
+
+  after(() => {
+    closeDatabase(db);
+    rmSync(configDir, { recursive: true, force: true });
+  });
+
+  test('deletes the applied clone without taking its audit trail or its dependent with it', () => {
+    const result = runMigrations(db, MIGRATIONS_DIR);
+    assert.deepEqual(result.applied, ['007_drop_import_list_create.sql']);
+    assert.equal(result.schemaVersion, 7);
+
+    const gone = db.prepare("SELECT COUNT(*) AS count FROM queue_items WHERE op = 'importList.create'").get() as {
+      count: number;
+    };
+    assert.equal(gone.count, 0);
+
+    // The event survives, unlinked: what happened is still in the run log.
+    const event = db.prepare('SELECT item_id, run_id, message FROM queue_events').get() as {
+      item_id: number | null;
+      run_id: number;
+      message: string;
+    };
+    assert.equal(event.item_id, null);
+    assert.equal(event.run_id, 1);
+    assert.match(event.message, /Created import list/);
+
+    // The dependent survives too, un-gated rather than cascaded away.
+    const dependent = db.prepare('SELECT depends_on_id, op FROM queue_items WHERE id = 2').get() as {
+      depends_on_id: number | null;
+      op: string;
+    };
+    assert.equal(dependent.op, 'tag.create');
+    assert.equal(dependent.depends_on_id, null);
+
+    assert.deepEqual(db.pragma('foreign_key_check') as unknown[], []);
   });
 });
