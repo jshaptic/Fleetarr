@@ -150,6 +150,64 @@ describe('filesystem operations in the unified queue', () => {
     assert.equal(allowed.body.ok, true, 'an orphan is nobody else business');
   });
 
+  /**
+   * The collection bridge, over HTTP rather than through the service.
+   *
+   * It is tested here and not only in `filesystem.service.test.ts` because the two halves
+   * can disagree: the route parses `assumeResolved` with zod, which strips any key the
+   * schema forgot, so a claim the service honours perfectly can still never reach it. That
+   * is precisely what happened to `collections` - the service test passed throughout.
+   */
+  test('the preflight route passes every assumeResolved claim through, collections included', async () => {
+    const target = path.join(movies(), 'Empty Folder');
+    const previous = arr.state.collections;
+    arr.state.collections = [
+      {
+        id: 90,
+        title: 'Empties',
+        monitored: true,
+        searchOnAdd: true,
+        qualityProfileId: 1,
+        minimumAvailability: 'released',
+        rootFolderPath: target,
+        tags: [],
+      },
+    ];
+
+    try {
+      // The guards read cached snapshots only, so the collection has to be warm.
+      await api<PathMatrixResponse>(server.url, '/storage/matrix?refresh=true');
+
+      const refused = await api<FsPreflight>(server.url, '/storage/preflight', {
+        method: 'POST',
+        body: { op: 'fs.delete', payload: { path: target, recursive: true, force: false } },
+      });
+      assert.equal(refused.body.ok, false);
+      assert.equal(
+        refused.body.checks.find((check) => check.id === 'collection_under')?.status,
+        'blocker',
+        'a monitored collection re-adds its films here on the next sync',
+      );
+
+      const bridged = await api<FsPreflight>(server.url, '/storage/preflight', {
+        method: 'POST',
+        body: {
+          op: 'fs.delete',
+          payload: { path: target, recursive: true, force: false },
+          assumeResolved: { collections: true },
+        },
+      });
+      assert.equal(bridged.body.ok, true, 'the staged collection.update clears the guard');
+      assert.equal(
+        bridged.body.checks.find((check) => check.id === 'collection_under')?.status,
+        'warning',
+      );
+    } finally {
+      arr.state.collections = previous;
+      await api<PathMatrixResponse>(server.url, '/storage/matrix?refresh=true');
+    }
+  });
+
   // ---------------------------------------------------------------- staging
 
   test('a filesystem operation stages with no instance', async () => {

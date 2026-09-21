@@ -4,6 +4,7 @@ import {
   PATH_SELECTORS,
   parsePathFilter,
   queuePayloadSchemas,
+  type FsAssumeResolved,
   type FsDirectoriesResponse,
   type FsMeasurement,
   type FsOp,
@@ -72,6 +73,21 @@ const matrixQuery = z.object({
     .transform((value) => value === 'true'),
 });
 
+/**
+ * Every claim `FsAssumeResolved` can carry, as one guarded shape.
+ *
+ * `satisfies Record<keyof FsAssumeResolved, ...>` is the whole point: zod strips keys it
+ * was not told about, so a bridge added to the type but forgotten here is not a type
+ * error and not a 400 - it is a checkbox that silently does nothing over HTTP, while the
+ * service test that calls `preflight()` directly keeps passing. That is exactly how
+ * `collections` came to be missing.
+ */
+const ASSUME_RESOLVED_SHAPE = {
+  rootFolders: z.boolean().optional(),
+  importLists: z.boolean().optional(),
+  collections: z.boolean().optional(),
+} satisfies Record<keyof FsAssumeResolved, z.ZodOptional<z.ZodBoolean>>;
+
 const preflightBody = z.object({
   op: z.enum(FS_OPS),
   payload: z.unknown(),
@@ -84,9 +100,7 @@ const preflightBody = z.object({
    * the same question with no assumptions, and the check either really has been cleared
    * or it fires for real.
    */
-  assumeResolved: z
-    .object({ rootFolders: z.boolean().optional(), importLists: z.boolean().optional() })
-    .optional(),
+  assumeResolved: z.object(ASSUME_RESOLVED_SHAPE).optional(),
 });
 
 /**
