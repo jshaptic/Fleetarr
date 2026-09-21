@@ -755,6 +755,24 @@ describe('MediaFleetView', () => {
     expect(wrapper.find('[data-testid="load-more"]').exists()).toBe(false);
   });
 
+  it('keeps the re-read above the table, where a long library cannot bury it', async () => {
+    const wrapper = await mountView();
+    const refresh = wrapper.find('[data-testid="media-refresh"]');
+    const table = wrapper.find('table');
+
+    // Under the last row it is unreachable on a fleet of any size - which is every fleet
+    // that has a reason to re-read.
+    expect(
+      table.element.compareDocumentPosition(refresh.element) & Node.DOCUMENT_POSITION_PRECEDING,
+    ).toBeTruthy();
+    expect(wrapper.find('[data-testid="media-scanned-at"]').text()).toContain('read');
+
+    const before = listMedia.mock.calls.length;
+    await refresh.trigger('click');
+    await flushPromises();
+    expect(listMedia.mock.calls.length).toBe(before + 1);
+  });
+
   it('opens one copy\'s full breakdown from its chip, and says what it cannot know', async () => {
     const wrapper = await mountView();
     await rowFor(wrapper, 'Shogun')?.find('[data-instance="3"]').trigger('click');

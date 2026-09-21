@@ -210,7 +210,27 @@ onMounted(() => {
           Select titles to tag, move, monitor or delete them across the fleet
         </span>
 
+        <span
+          v-if="media.scannedAt !== null"
+          class="text-[11px] text-faint"
+          data-testid="media-scanned-at"
+        >
+          read {{ formatRelativeTime(media.scannedAt) }}
+        </span>
+
         <div class="ml-auto flex flex-wrap items-center gap-2">
+          <!-- Beside the actions rather than under the last page: a fleet this big is exactly
+               the one whose refresh nobody scrolls to. -->
+          <BaseButton
+            size="sm"
+            data-testid="media-refresh"
+            :loading="media.loading"
+            title="Drop the cached snapshots and read every instance again"
+            @click="media.load({ refresh: true })"
+          >
+            Re-read the fleet
+          </BaseButton>
+          <span class="mx-1 h-5 w-px bg-line" aria-hidden="true"></span>
           <BaseButton size="sm" :disabled="!canAct" @click="dialog = 'tags'">Tags…</BaseButton>
           <BaseButton size="sm" :disabled="!canAct" @click="dialog = 'root'">
             Root folder…
@@ -477,16 +497,6 @@ onMounted(() => {
             :loading="media.loading"
             @page="media.goToPage($event)"
           />
-          <BaseButton
-            size="sm"
-            variant="ghost"
-            class="ml-auto"
-            :loading="media.loading"
-            title="Drop the cached snapshots and read every instance again"
-            @click="media.load({ refresh: true })"
-          >
-            Re-read the fleet
-          </BaseButton>
         </div>
       </div>
     </template>
